@@ -12,7 +12,7 @@
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools'
 import { LiveRelay } from '../liverelay.mjs'
 import {
-  newScopeKey, publishScope, grant, rotateScope, deleteScope,
+  localSigner, newScopeKey, publishScope, grant, rotateScope, deleteScope,
   receiveGrants, latestGrants, fetchScope,
   loadGrantIndex, saveGrantIndex, toIssuedEntry, fromIssuedEntry,
 } from '../nipxx.mjs'
@@ -48,7 +48,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 const short = (pk) => { const n = nip19.npubEncode(pk); return n.slice(0, 12) + '…' + n.slice(-4) }
 
-let relay, sk, me
+let relay, signer, me
 let myIndex = { issued: [], received: [] }
 let myScopes = []            // { scopeId, scopeName, generation, scopeKey, grantees, fields, draft? }
 let profiles = new Map()     // pubkey → kind-0 profile
@@ -82,10 +82,24 @@ function showTab(t) {
 }
 for (const b of document.querySelectorAll('.tab')) b.onclick = () => showTab(b.dataset.tab)
 
-function login(secret) {
-  sk = secret
-  me = getPublicKey(sk)
-  sessionStorage.setItem('nontact-sk', Array.from(sk, b => b.toString(16).padStart(2, '0')).join(''))
+// NIP-07: the browser extension holds the key; the page only ever sees
+// signatures and nip44 plaintexts. Maps 1:1 onto the lib's signer interface.
+function nip07Signer() {
+  const n = window.nostr
+  let pub = null
+  return {
+    getPublicKey: async () => (pub ??= await n.getPublicKey()),
+    signEvent: (event) => n.signEvent(event),
+    nip44Encrypt: (pk, plaintext) => n.nip44.encrypt(pk, plaintext),
+    nip44Decrypt: (pk, ciphertext) => n.nip44.decrypt(pk, ciphertext),
+  }
+}
+
+async function login(s, remember) {
+  signer = s
+  try { me = await signer.getPublicKey() }
+  catch (err) { $('err').textContent = `extension refused: ${err.message}`; return }
+  sessionStorage.setItem('nontact-login', remember)
   relay ??= new LiveRelay(RELAYS)
   $('login').style.display = 'none'
   $('me').style.display = 'flex'
@@ -97,17 +111,31 @@ function login(secret) {
   load()
 }
 
+const hexOf = (bytes) => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+
 $('go').onclick = () => {
-  try { login(parseKey($('nsec').value)) }
+  try { const k = parseKey($('nsec').value); login(localSigner(k), hexOf(k)) }
   catch { $('err').textContent = 'Could not parse that — expected nsec1… or 64 hex chars.' }
 }
 $('nsec').onkeydown = (e) => { if (e.key === 'Enter') $('go').onclick() }
-$('gen').onclick = () => login(generateSecretKey())
+$('gen').onclick = () => { const k = generateSecretKey(); login(localSigner(k), hexOf(k)) }
+$('nip07').onclick = () => {
+  if (!window.nostr?.nip44) {
+    $('err').textContent = 'No NIP-07 extension found (or it lacks nip44 support). Try Alby or nos2x.'
+    return
+  }
+  login(nip07Signer(), 'nip07')
+}
 $('refresh').onclick = () => load()
-$('logout').onclick = () => { sessionStorage.removeItem('nontact-sk'); location.hash = ''; location.reload() }
+$('logout').onclick = () => { sessionStorage.removeItem('nontact-login'); location.hash = ''; location.reload() }
 
-const saved = sessionStorage.getItem('nontact-sk')
-if (saved) login(Uint8Array.from(saved.match(/../g), h => parseInt(h, 16)))
+const saved = sessionStorage.getItem('nontact-login')
+if (saved === 'nip07') {
+  // extensions inject window.nostr after page scripts run — give it a beat
+  setTimeout(() => { if (window.nostr?.nip44) login(nip07Signer(), 'nip07') }, 250)
+} else if (saved) {
+  login(localSigner(Uint8Array.from(saved.match(/../g), h => parseInt(h, 16))), saved)
+}
 
 // ------------------------------------------------------------------ load
 
@@ -118,8 +146,8 @@ async function load() {
     const [myLists, followerLists, grants, index] = await Promise.all([
       relay.query({ kinds: [3], authors: [me], limit: 2 }),
       relay.query({ kinds: [3], '#p': [me], limit: 300 }),
-      receiveGrants(relay, sk),
-      loadGrantIndex(relay, sk),
+      receiveGrants(relay, signer),
+      loadGrantIndex(relay, signer),
     ])
     myIndex = index
     const follows = new Set((myLists[0]?.tags ?? []).filter(t => t[0] === 'p').map(t => t[1]))
@@ -171,7 +199,7 @@ async function load() {
 const contactName = (pk) => profiles.get(pk)?.display_name || profiles.get(pk)?.name || short(pk)
 
 async function grantShare(s, pub) {
-  await grant(relay, sk, pub, { ...s, relayHint: RELAYS[0] })
+  await grant(relay, signer, pub, { ...s, relayHint: RELAYS[0] })
   if (!s.grantees.includes(pub)) s.grantees.push(pub)
   await syncIndex()
   renderMine()
@@ -181,7 +209,7 @@ async function grantShare(s, pub) {
 async function revokeShare(s, pub) {
   if (!confirm(`Stop sharing "${s.scopeName}" with ${contactName(pub)}?\n\nThis rotates the scope key and re-grants the ${s.grantees.length - 1} other grantee(s). They keep what they already saw — that is physics — but get no future updates.`)) return
   const survivors = s.grantees.filter(p => p !== pub)
-  const rotated = await rotateScope(relay, sk, {
+  const rotated = await rotateScope(relay, signer, {
     scopeId: s.scopeId, generation: s.generation, scopeName: s.scopeName,
     payload: { name: s.scopeName, fields: s.fields }, survivors,
   })
@@ -192,7 +220,7 @@ async function revokeShare(s, pub) {
 }
 
 // syncIndex: published scopes are the source of truth; `received` preserved.
-const syncIndex = () => saveGrantIndex(relay, sk, {
+const syncIndex = () => saveGrantIndex(relay, signer, {
   ...myIndex, issued: myScopes.filter(s => !s.draft).map(s => toIssuedEntry(s, s.grantees)),
 })
 
@@ -344,7 +372,7 @@ async function deleteMine(i, sec) {
   const msg = sec.querySelector('.publish-msg')
   msg.textContent = 'tombstoning…'
   try {
-    await deleteScope(relay, sk, s)
+    await deleteScope(relay, signer, s)
     myScopes.splice(i, 1)
     await syncIndex()
     renderMine()
@@ -357,7 +385,7 @@ async function publishMine(i, sec) {
   msg.textContent = 'publishing…'
   try {
     s.fields = collectFields(sec)
-    await publishScope(relay, sk, { ...s, payload: { name: s.scopeName, fields: s.fields } })
+    await publishScope(relay, signer, { ...s, payload: { name: s.scopeName, fields: s.fields } })
     const wasDraft = s.draft
     s.draft = false
     s.lost = false
@@ -388,7 +416,7 @@ async function shareAll(i, sec) {
     let n = 0
     for (const pub of targets) {
       msg.textContent = `granting… ${++n}/${targets.length}`
-      await grant(relay, sk, pub, { ...s, relayHint: RELAYS[0] })
+      await grant(relay, signer, pub, { ...s, relayHint: RELAYS[0] })
       if (!s.grantees.includes(pub)) s.grantees.push(pub)
     }
     await syncIndex()

@@ -199,9 +199,12 @@
     <h2>Sign in</h2>
     <p>Your key never leaves this tab. Grants addressed to you are unwrapped
        locally; contact data is decrypted in the browser.</p>
+    <div class="row" style="margin-bottom:10px">
+      <button class="primary" id="nip07" style="flex:1">Sign in with extension (NIP-07)</button>
+    </div>
     <div class="row">
-      <input id="nsec" placeholder="nsec1… or 64-char hex" autocomplete="off">
-      <button class="primary" id="go">Open address book</button>
+      <input id="nsec" placeholder="…or paste nsec1… / 64-char hex (demo only)" autocomplete="off">
+      <button id="go">Open</button>
     </div>
     <div class="alt">No key? <a id="gen">Generate a throwaway</a> — or run
       <code>npm run seed</code> for a pre-populated demo identity.</div>

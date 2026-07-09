@@ -11,7 +11,7 @@
 // in-memory relay (relay.mjs) and the SimplePool adapter (liverelay.mjs) drive
 // this single implementation of the wire format.
 
-import { finalizeEvent, getPublicKey, nip44, nip59 } from 'nostr-tools'
+import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey, nip44, verifyEvent } from 'nostr-tools'
 
 export const KIND_DATA_SET = 30440
 export const KIND_GRANT = 440
@@ -21,6 +21,52 @@ export const KIND_GRANT_INDEX = 10440
 
 // Web-platform primitives only (crypto, btoa/atob) — this file runs
 // unchanged in Node ≥ 20 and in the browser.
+
+// ------------------------------------------------------------------ signers
+//
+// Every keyholder parameter accepts either a raw 32-byte secret key or a
+// *signer*: { getPublicKey(), signEvent(event), nip44Encrypt(pub, pt),
+// nip44Decrypt(pub, ct) } — all async. A NIP-07 browser extension maps onto
+// this interface directly, so clients never need the raw key in-page.
+
+export function localSigner(sk) {
+  const pub = getPublicKey(sk)
+  const conv = (pk) => nip44.v2.utils.getConversationKey(sk, pk)
+  return {
+    getPublicKey: async () => pub,
+    signEvent: async (event) => finalizeEvent(event, sk),
+    nip44Encrypt: async (pk, plaintext) => nip44.v2.encrypt(plaintext, conv(pk)),
+    nip44Decrypt: async (pk, ciphertext) => nip44.v2.decrypt(ciphertext, conv(pk)),
+  }
+}
+
+const asSigner = (s) => s instanceof Uint8Array ? localSigner(s) : s
+
+// NIP-59, from signer primitives (nostr-tools' nip59 needs the raw key).
+// Timestamps are fuzzed up to two days into the past, per the NIP.
+const fuzz = () => now() - Math.floor(Math.random() * 2 * 24 * 60 * 60)
+
+async function giftWrap(signer, recipientPub, rumor) {
+  rumor.id = getEventHash(rumor)
+  const seal = await signer.signEvent({
+    kind: 13, created_at: fuzz(), tags: [],
+    content: await signer.nip44Encrypt(recipientPub, JSON.stringify(rumor)),
+  })
+  const ephemeral = generateSecretKey()
+  return finalizeEvent({
+    kind: 1059, created_at: fuzz(), tags: [['p', recipientPub]],
+    content: nip44.v2.encrypt(JSON.stringify(seal),
+      nip44.v2.utils.getConversationKey(ephemeral, recipientPub)),
+  }, ephemeral)
+}
+
+async function giftUnwrap(signer, wrap) {
+  const seal = JSON.parse(await signer.nip44Decrypt(wrap.pubkey, wrap.content))
+  if (seal.kind !== 13 || !verifyEvent(seal)) throw new Error('bad seal')
+  const rumor = JSON.parse(await signer.nip44Decrypt(seal.pubkey, seal.content))
+  if (rumor.pubkey !== seal.pubkey) throw new Error('seal/rumor pubkey mismatch')
+  return rumor
+}
 
 /** A scope key is a random 32-byte symmetric key. */
 export const newScopeKey = () => crypto.getRandomValues(new Uint8Array(32))
@@ -45,12 +91,12 @@ const symDecrypt = (ciphertext, scopeKey) => JSON.parse(nip44.v2.decrypt(ciphert
  */
 export async function publishScope(relay, publisherSecret, { scopeId, generation, scopeKey, payload }) {
   const ts = now()
-  const event = finalizeEvent({
+  const event = await asSigner(publisherSecret).signEvent({
     kind: KIND_DATA_SET,
     created_at: ts,
     tags: [['d', scopeId], ['v', String(generation)]],
     content: symEncrypt({ ...payload, updated_at: ts }, scopeKey),
-  }, publisherSecret)
+  })
   const receipt = await relay.publish(event)
   return { event, ...receipt }
 }
@@ -63,8 +109,10 @@ export async function publishScope(relay, publisherSecret, { scopeId, generation
  */
 export async function grant(relay, publisherSecret, granteePubkey,
                             { scopeId, generation, scopeKey, scopeName, relayHint = '' }) {
-  const publisherPub = getPublicKey(publisherSecret)
+  const signer = asSigner(publisherSecret)
+  const publisherPub = await signer.getPublicKey()
   const rumor = {
+    pubkey: publisherPub,
     kind: KIND_GRANT,
     created_at: now(),
     tags: [
@@ -73,7 +121,7 @@ export async function grant(relay, publisherSecret, granteePubkey,
     ],
     content: JSON.stringify({ scope_key: b64(scopeKey), scope_name: scopeName }),
   }
-  const wrap = nip59.wrapEvent(rumor, publisherSecret, granteePubkey)
+  const wrap = await giftWrap(signer, granteePubkey, rumor)
   const receipt = await relay.publish(wrap)
   return { wrap, ...receipt }
 }
@@ -102,18 +150,19 @@ export async function rotateScope(relay, publisherSecret,
  * generation supersession — indistinguishable from revocation, deliberately.
  */
 export async function deleteScope(relay, publisherSecret, { scopeId, generation }) {
-  await publishScope(relay, publisherSecret, {
+  const signer = asSigner(publisherSecret)
+  await publishScope(relay, signer, {
     scopeId, generation: generation + 1, scopeKey: newScopeKey(), payload: {},
   })
-  const event = finalizeEvent({
+  const event = await signer.signEvent({
     kind: 5,
     created_at: now(),
     tags: [
-      ['a', `${KIND_DATA_SET}:${getPublicKey(publisherSecret)}:${scopeId}`],
+      ['a', `${KIND_DATA_SET}:${await signer.getPublicKey()}:${scopeId}`],
       ['k', String(KIND_DATA_SET)],
     ],
     content: '',
-  }, publisherSecret)
+  })
   const receipt = await relay.publish(event)
   return { event, ...receipt }
 }
@@ -122,22 +171,25 @@ export async function deleteScope(relay, publisherSecret, { scopeId, generation 
 
 /** Collect and unwrap all grants addressed to this keyholder. */
 export async function receiveGrants(relay, granteeSecret) {
-  const granteePub = getPublicKey(granteeSecret)
+  const signer = asSigner(granteeSecret)
+  const granteePub = await signer.getPublicKey()
   const wraps = await relay.query({ kinds: [1059], '#p': [granteePub] })
-  return wraps
-    .map(wrap => { try { return nip59.unwrapEvent(wrap, granteeSecret) } catch { return null } })
-    .filter(rumor => rumor?.kind === KIND_GRANT)
-    .map(rumor => {
-      const [, address, relayHint] = rumor.tags.find(t => t[0] === 'a')
-      const [kind, publisher, scopeId] = address.split(':')
-      const { scope_key, scope_name } = JSON.parse(rumor.content)
-      return {
-        publisher, scopeId, scopeName: scope_name, relayHint,
-        generation: Number(rumor.tags.find(t => t[0] === 'v')?.[1] ?? 0),
-        scopeKey: unb64(scope_key),
-        issuedAt: rumor.created_at,
-      }
+  const grants = []
+  for (const wrap of wraps) {
+    let rumor
+    try { rumor = await giftUnwrap(signer, wrap) } catch { continue }
+    if (rumor.kind !== KIND_GRANT) continue
+    const [, address, relayHint] = rumor.tags.find(t => t[0] === 'a')
+    const [kind, publisher, scopeId] = address.split(':')
+    const { scope_key, scope_name } = JSON.parse(rumor.content)
+    grants.push({
+      publisher, scopeId, scopeName: scope_name, relayHint,
+      generation: Number(rumor.tags.find(t => t[0] === 'v')?.[1] ?? 0),
+      scopeKey: unb64(scope_key),
+      issuedAt: rumor.created_at,
     })
+  }
+  return grants
 }
 
 /** Keep only the newest grant per (publisher, scope) — key rotations supersede. */
@@ -185,7 +237,6 @@ export async function addressBook(relay, granteeSecret) {
 // NIP-44 to self: conversation key derived from one's own keypair, as in
 // NIP-51 private items. The index carries all key material and must never
 // exist unencrypted on a relay.
-const selfKey = (secret) => nip44.v2.utils.getConversationKey(secret, getPublicKey(secret))
 
 /**
  * Load the user's Grant Index. `issued` is the publisher's authoritative
@@ -193,20 +244,23 @@ const selfKey = (secret) => nip44.v2.utils.getConversationKey(secret, getPublicK
  * address book — both recoverable from the nsec alone.
  */
 export async function loadGrantIndex(relay, secret) {
-  const [event] = await relay.query({ kinds: [KIND_GRANT_INDEX], authors: [getPublicKey(secret)] })
+  const signer = asSigner(secret)
+  const pub = await signer.getPublicKey()
+  const [event] = await relay.query({ kinds: [KIND_GRANT_INDEX], authors: [pub] })
   return event
-    ? JSON.parse(nip44.v2.decrypt(event.content, selfKey(secret)))
+    ? JSON.parse(await signer.nip44Decrypt(pub, event.content))
     : { issued: [], received: [] }
 }
 
 /** Encrypt and (re)publish the Grant Index. Replaceable — newest wins. */
 export async function saveGrantIndex(relay, secret, index) {
-  const event = finalizeEvent({
+  const signer = asSigner(secret)
+  const event = await signer.signEvent({
     kind: KIND_GRANT_INDEX,
     created_at: now(),
     tags: [],
-    content: nip44.v2.encrypt(JSON.stringify(index), selfKey(secret)),
-  }, secret)
+    content: await signer.nip44Encrypt(await signer.getPublicKey(), JSON.stringify(index)),
+  })
   const receipt = await relay.publish(event)
   return { event, ...receipt }
 }
