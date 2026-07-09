@@ -154,6 +154,7 @@ For the publisher, `issued` is the authoritative record needed to perform rotati
 - **NIP-51**: a grantee MAY additionally organize granted contacts using private list items; the Grant Index is distinct because it must carry key material.
 - **NIP-65**: grantees SHOULD use the publisher's relay list metadata, plus grant relay hints, to locate `kind:30440` events.
 - **NIP-05**: publishers MAY include their NIP-05 identifier inside a scope payload; it plays no role in the grant mechanism itself.
+- **MLS-based group messaging** (NIP-EE / Marmot) solves a different problem: end-to-end encrypted *conversation streams* with forward secrecy and group evolution. This NIP addresses authoritative, addressable *data records* with live dereference and revocation-by-rotation; the two are orthogonal and complementary.
 
 ## Security and privacy considerations
 
