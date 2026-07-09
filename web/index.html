@@ -25,6 +25,12 @@
     --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   * { box-sizing: border-box; }
+  #alpha {
+    background: rgba(217, 166, 72, 0.1); color: var(--warn);
+    text-align: center; font-size: 12.5px; padding: 6px 14px;
+    border-bottom: 1px solid rgba(217, 166, 72, 0.25);
+  }
+  #alpha a { color: var(--warn); }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -184,6 +190,9 @@
 </style>
 </head>
 <body>
+<div id="alpha">alpha — a working demo of a draft NIP; kind numbers are pending
+  assignment in review. Use a throwaway key or NIP-07 test profile and treat
+  data as ephemeral. <a href="https://github.com/JAFairweather/nostr-scoped-data-grants">spec + code</a></div>
 <header>
   <h1>N<span>on</span>tact</h1>
   <div class="tag">the no-maintenance address book</div>
@@ -218,6 +227,6 @@
   <section id="mycard" style="display:none"></section>
   <div id="book"></div>
 </main>
-<script type="module" src="/web/app.mjs"></script>
+<script type="module" src="app.mjs"></script>
 </body>
 </html>
