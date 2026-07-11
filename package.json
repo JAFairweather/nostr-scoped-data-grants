@@ -8,8 +8,7 @@
     "smoke": "node smoke.mjs",
     "smoke:local": "node smoke.mjs --local",
     "interop": "cd go && go build -o nipxx . && cd .. && node interop.mjs",
-    "seed": "node seed.mjs",
-    "web": "node web/serve.mjs"
+    "seed": "node seed.mjs"
   },
   "dependencies": {
     "nostr-tools": "^2.0.0",

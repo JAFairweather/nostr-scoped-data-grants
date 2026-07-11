@@ -40,22 +40,28 @@ npm run smoke:local   # 11 assertions, in-memory
 npm run smoke         # same 11 assertions against real public relays
 npm run interop       # 5 JS↔Go cross-implementation assertions (needs Go)
 npm run seed          # throwaway demo graph on live relays → prints a login key
-npm run web           # Nontact, a working contact manager: localhost:4440
 ```
 
-## Nontact — the no-maintenance address book
+## Applications built on NIP-DA
 
-`web/` is a complete client over the NIP (vanilla ESM, no build step):
+Four independent apps run on this protocol. Each lives in its own repo, ships
+as a pure client (no server, no build step), and vendors the reference lib.
 
-- **Address book**: your kind-3 follows, your followers, and everyone whose
-  grants you hold, merged into one view. Shared data is dereferenced live —
-  nothing displayed is a stored copy. Revoked scopes surface honestly.
-- **My card**: your record as one card — scopes as sections, each with its
-  own key and audience. Edit and republish (updates are free), share per
-  contact or per scope, unshare (rotates the key), delete (tombstone +
-  NIP-09).
+- **[Nontact](https://github.com/JAFairweather/nontact)** — the no-maintenance
+  address book: nobody maintains contact data about anyone else.
+  → [live](https://jafairweather.github.io/nontact/)
+- **[Nvelope](https://github.com/JAFairweather/nvelope)** — live folders, real
+  revocation (encrypted document sharing).
+  → [live](https://jafairweather.github.io/nvelope/app/)
+- **[Notegate](https://github.com/JAFairweather/notegate)** — serverless secure
+  tip intake.
+  → [live](https://jafairweather.github.io/notegate/)
+- **[Nvoy](https://github.com/JAFairweather/nvoy)** — scoped, revocable data
+  delegation to AI agents (MCP server).
+  → [live](https://jafairweather.github.io/nvoy/)
 
-Run `npm run seed`, then `npm run web`, and sign in with the printed key.
+Run `npm run seed` here for a throwaway demo graph, then sign in to Nontact
+with the printed key.
 
 ## Protocol summary
 
@@ -89,7 +95,6 @@ Run `npm run seed`, then `npm run web`, and sign in with the printed key.
 | `smoke.mjs`     | 11-assertion test, `--local` or live |
 | `go/main.go`    | second implementation: Go CLI over go-nostr |
 | `interop.mjs`   | JS↔Go cross-implementation test, live relays |
-| `web/`          | Nontact web client (no build step) |
 | `seed.mjs`      | demo-graph seeder for Nontact |
 
 ## Design notes

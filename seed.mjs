@@ -2,7 +2,9 @@
 // UI, then print the nsec to sign in with. Dummy data only (.invalid, 555
 // numbers); everything protocol-level is ciphertext on the wire.
 //
-//   node seed.mjs        # then: npm run web → paste the printed nsec
+//   node seed.mjs        # then paste the printed nsec into Nontact
+//                        # (https://jafairweather.github.io/nontact/ or
+//                        #  github.com/JAFairweather/nontact → npm run web)
 //
 // The seed also prints an --update command that republishes Alice's Personal
 // scope with a new phone number — run it, click Refresh in Nontact, and
