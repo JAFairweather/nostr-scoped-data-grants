@@ -1,1 +1,316 @@
-<!doctype html><meta http-equiv="refresh" content="0; url=https://jafairweather.github.io/nontact/"><a href="https://jafairweather.github.io/nontact/">Nontact</a>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nscope — Scoped Data Grants. Revocation is a key rotation.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20x%3D%221%22%20y%3D%221%22%20width%3D%2230%22%20height%3D%2230%22%20rx%3D%227%22%20fill%3D%22%230b0906%22%20stroke%3D%22%23d8c690%22%20stroke-opacity%3D%220.5%22%20stroke-width%3D%221.2%22%2F%3E%3Cg%20transform%3D%22translate(4%204)%22%20fill%3D%22none%22%20stroke%3D%22%23d8c690%22%20stroke-width%3D%221.6%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%228%22%2F%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2210.5%22%20r%3D%221.9%22%2F%3E%3Cpath%20d%3D%22M12%2012.4%20V15.6%22%20stroke-linecap%3D%22round%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E" type="image/svg+xml">
+<meta name="description" content="Nscope (NIP-DA — Scoped Data Grants): permissioned private data sharing on nostr, with real revocation. Publish an encrypted scope under your own key, grant its key to whoever needs it, and revoke by rotating the key. Zero relay changes. Two reference implementations. Verified on public relays.">
+<meta name="theme-color" content="#0d0a07">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Nscope — Revocation isn't a policy. It's a key rotation.">
+<meta property="og:description" content="Permissioned private data sharing on nostr. The signature is the authorization; the rotation is the revocation. A draft NIP with two independent implementations, verified live on public relays.">
+<style>
+  :root {
+    --ink: #0b0906;
+    --ink2: #12100a;
+    --panel: #16130b;
+    --line: #2a2317;
+    --scope: #d8c690;
+    --scope-bright: #efe0ac;
+    --gold: #c39a56;
+    --cream: #f4efe4;
+    --dim: #9c927f;
+    --mono: "Courier New", ui-monospace, monospace;
+    --serif: Georgia, "Times New Roman", serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--ink); color: var(--cream);
+    font-family: var(--serif); line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--scope); text-decoration: none; }
+  a:hover { color: var(--scope-bright); }
+  .wrap { width: min(920px, 92vw); margin: 0 auto; }
+  .kicker {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.28em;
+    text-transform: uppercase; color: var(--dim);
+  }
+  .rule { height: 1px; background: linear-gradient(90deg, transparent, var(--line) 20%, var(--line) 80%, transparent); margin: 0; }
+
+  /* -------------------------------------------------------- hero */
+  .hero { text-align: center; padding: 88px 0 60px; position: relative; overflow: hidden; }
+  .hero::before {
+    content: ""; position: absolute; inset: -40% 0 auto 0; height: 460px;
+    background: radial-gradient(60% 90% at 50% 0%, color-mix(in srgb, var(--scope) 12%, transparent), transparent 70%);
+    pointer-events: none;
+  }
+  .scope-mark { width: 92px; height: 92px; margin: 0 auto 22px; display: block; position: relative; }
+  .wordmark {
+    font-family: var(--mono); font-size: clamp(40px, 9vw, 76px); letter-spacing: 0.16em;
+    margin: 0; color: var(--cream); font-weight: 700;
+    text-shadow: 0 2px 30px color-mix(in srgb, var(--scope) 30%, transparent);
+  }
+  .formal { font-family: var(--mono); font-size: 13px; letter-spacing: 0.22em; color: var(--scope); text-transform: uppercase; margin: 12px 0 0; }
+  .lede { font-size: clamp(21px, 3.4vw, 30px); font-style: italic; color: var(--cream); margin: 26px auto 0; max-width: 22ch; line-height: 1.35; }
+  .sub { color: var(--dim); max-width: 60ch; margin: 20px auto 0; font-size: 17px; }
+  .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 34px; }
+  .btn {
+    font-family: var(--mono); font-size: 13px; letter-spacing: 0.1em;
+    padding: 12px 22px; border: 1px solid color-mix(in srgb, var(--scope) 55%, transparent);
+    border-radius: 3px; color: var(--ink); background: var(--scope); transition: all .18s;
+  }
+  .btn:hover { background: var(--scope-bright); color: var(--ink); transform: translateY(-1px); }
+  .btn.ghost { background: transparent; color: var(--scope); }
+  .btn.ghost:hover { background: color-mix(in srgb, var(--scope) 14%, transparent); color: var(--scope-bright); }
+
+  /* ---------------------------------------------------- sections */
+  section { padding: 62px 0; }
+  .section-title { font-size: clamp(25px, 4vw, 36px); margin: 10px 0 0; color: var(--cream); line-height: 1.2; }
+  .lead { font-size: 18px; color: color-mix(in srgb, var(--cream) 88%, var(--dim)); max-width: 66ch; }
+  strong { color: var(--scope-bright); font-weight: 600; }
+  em { color: var(--cream); }
+
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; margin-top: 30px; }
+  @media (max-width: 680px) { .twocol { grid-template-columns: 1fr; } }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 22px 24px; background: var(--ink2); }
+  .stat h4 { margin: 0 0 6px; font-family: var(--mono); font-size: 13px; letter-spacing: 0.06em; color: var(--scope); text-transform: uppercase; }
+  .stat p { margin: 0; color: color-mix(in srgb, var(--cream) 82%, var(--dim)); font-size: 15px; }
+  .stat code { font-family: var(--mono); color: var(--scope-bright); font-size: 13px; }
+
+  /* the mechanism — the kinds */
+  .kinds { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; margin-top: 30px; }
+  @media (max-width: 680px) { .kinds { grid-template-columns: 1fr; } }
+  .kind {
+    border: 1px solid var(--line); border-left: 3px solid var(--scope);
+    border-radius: 6px; padding: 20px 22px; background: var(--panel);
+  }
+  .kind .num { font-family: var(--mono); font-size: 22px; color: var(--scope-bright); letter-spacing: 0.04em; }
+  .kind .role { font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--dim); margin-left: 8px; }
+  .kind p { margin: 10px 0 0; font-size: 15px; color: color-mix(in srgb, var(--cream) 84%, var(--dim)); }
+
+  /* facts strip */
+  .facts { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+  .fact {
+    font-family: var(--mono); font-size: 12.5px; letter-spacing: 0.04em;
+    padding: 9px 15px; border: 1px solid color-mix(in srgb, var(--scope) 35%, var(--line));
+    border-radius: 999px; color: var(--scope); background: color-mix(in srgb, var(--scope) 7%, transparent);
+  }
+
+  /* code block */
+  .flow {
+    font-family: var(--mono); font-size: 13.5px; line-height: 1.9; color: var(--cream);
+    background: #0e0c07; border: 1px solid var(--line); border-radius: 8px;
+    padding: 22px 24px; margin-top: 24px; overflow-x: auto; white-space: pre;
+  }
+  .flow .c { color: var(--dim); }
+  .flow .k { color: var(--scope-bright); }
+
+  /* apps */
+  .apps { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 26px; }
+  .app {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 10px 16px; border: 1px solid var(--line); border-radius: 999px;
+    background: var(--ink2); font-size: 14.5px; color: var(--cream); transition: border-color .18s;
+  }
+  .app:hover { border-color: color-mix(in srgb, var(--scope) 50%, transparent); }
+  .app b { font-weight: 600; }
+  .app .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--a); }
+  .app .live { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; color: var(--scope); text-transform: uppercase; }
+
+  /* cta band */
+  .band { text-align: center; background: linear-gradient(180deg, var(--ink2), var(--ink)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+
+  footer { padding: 40px 0 60px; text-align: center; }
+  footer .mono { font-family: var(--mono); font-size: 12px; letter-spacing: 0.1em; color: var(--dim); }
+  footer .flinks { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; margin: 14px 0; font-family: var(--mono); font-size: 13px; }
+  .whisper { color: color-mix(in srgb, var(--dim) 80%, transparent); font-style: italic; font-size: 14px; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <svg class="scope-mark" viewBox="0 0 100 100" fill="none" aria-hidden="true">
+      <circle cx="50" cy="50" r="46" stroke="#d8c690" stroke-width="1" opacity="0.45"/>
+      <circle cx="50" cy="50" r="34" stroke="#d8c690" stroke-width="1.4"/>
+      <circle cx="50" cy="50" r="24" stroke="#d8c690" stroke-width="0.7" opacity="0.4"/>
+      <line x1="50" y1="4" x2="50" y2="20" stroke="#d8c690" stroke-width="1" opacity="0.6"/>
+      <line x1="50" y1="80" x2="50" y2="96" stroke="#d8c690" stroke-width="1" opacity="0.6"/>
+      <line x1="4" y1="50" x2="20" y2="50" stroke="#d8c690" stroke-width="1" opacity="0.6"/>
+      <line x1="80" y1="50" x2="96" y2="50" stroke="#d8c690" stroke-width="1" opacity="0.6"/>
+      <circle cx="50" cy="44" r="7.5" stroke="#efe0ac" stroke-width="2"/>
+      <path d="M50 51 L50 64" stroke="#efe0ac" stroke-width="2.4" stroke-linecap="round"/>
+    </svg>
+    <h1 class="wordmark">NSCOPE</h1>
+    <p class="formal">NIP-DA · Scoped Data Grants</p>
+    <p class="lede">Revocation isn't a policy. It's a key rotation.</p>
+    <p class="sub">Permissioned private data sharing on nostr. Publish one encrypted record under
+      your own key, hand its key to whoever needs it, and take them out by rotating the key —
+      their copy simply stops opening. No account to close. No company in the middle.</p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/JAFairweather/nostr-scoped-data-grants/blob/main/SPEC.md">Read the spec</a>
+      <a class="btn ghost" href="https://github.com/nostr-protocol/nips/pull/2411" target="_blank" rel="noopener">The NIP · PR #2411 ↗</a>
+    </div>
+  </div>
+</header>
+
+<div class="wrap"><div class="rule"></div></div>
+
+<!-- The inversion -->
+<section id="why">
+  <div class="wrap">
+    <span class="kicker">The inversion</span>
+    <h2 class="section-title">Nobody maintains data about anyone else.</h2>
+    <p class="lead">Today, your details live in a hundred other people's address books, CRMs, and
+      spreadsheets — <em>N² rotting copies</em>, each stale the moment you move, each a breach
+      waiting to happen, none of them yours to correct. Scoped Data Grants flips it: <strong>you keep
+      one authoritative, encrypted record of your own data</strong> and grant scoped, revocable access
+      to specific keyholders. Everyone else holds a <em>capability</em> — a pointer plus a decryption
+      right — that always dereferences to your <em>current</em> truth. <strong>N self-maintained records
+      instead of N² decaying ones.</strong></p>
+    <div class="twocol">
+      <div class="stat">
+        <h4>The authorization is a signature</h4>
+        <p>You grant access by delivering a key to a grantee's nostr pubkey — gift-wrapped, so relays
+          never learn who granted what to whom. No permission table on anyone's server.</p>
+      </div>
+      <div class="stat">
+        <h4>The revocation is a rotation</h4>
+        <p>To cut someone off, you rotate the scope key and re-grant the rest. Their old key opens
+          nothing. Revocation isn't a request you hope a platform honors — it's math.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="rule"></div></div>
+
+<!-- The mechanism -->
+<section id="how">
+  <div class="wrap">
+    <span class="kicker">The mechanism</span>
+    <h2 class="section-title">Four event kinds. Nothing new from relays.</h2>
+    <p class="lead">Built entirely on <strong>NIP-44</strong> (encrypted payloads) and <strong>NIP-59</strong>
+      (gift wrap), over plain NIP-01 addressable events. Relays store only ciphertext and require
+      <em>zero</em> changes.</p>
+    <div class="kinds">
+      <div class="kind">
+        <span class="num">30440</span><span class="role">Scoped Data Set</span>
+        <p>Your encrypted record, addressable and replaceable. Symmetric-encrypted under a scope key.
+          Republish to update — every grantee instantly reads the new version. This is what makes
+          grants <em>live</em>.</p>
+      </div>
+      <div class="kind">
+        <span class="num">440</span><span class="role">Data Grant</span>
+        <p>An unsigned rumor that delivers a scope key to one grantee, sealed and gift-wrapped
+          (kind 1059) per NIP-59. Relays see only an ephemeral key handing an opaque payload to a
+          recipient — the grant graph stays private.</p>
+      </div>
+      <div class="kind">
+        <span class="num">441</span><span class="role">Revocation notice</span>
+        <p>An optional, gift-wrapped courtesy: tells a revoked party their access ended so their client
+          can mark the data stale. Silent revocation works too — the rotation already did the work.</p>
+      </div>
+      <div class="kind">
+        <span class="num">10440</span><span class="role">Grant Index</span>
+        <p>Your private, self-encrypted ledger of grants issued and received. For the publisher it's the
+          record needed to rotate; for the grantee it's the real address book — recoverable from your
+          key alone.</p>
+      </div>
+    </div>
+    <div class="flow"><span class="c"># the whole lifecycle, in the primitive's own terms</span>
+publish   <span class="k">30440</span>  <span class="c">encrypt your record under a fresh scope key</span>
+grant     <span class="k">440</span>    <span class="c">gift-wrap that key to each keyholder</span>
+update    <span class="k">30440</span>  <span class="c">re-encrypt + republish — everyone sees it live</span>
+revoke    <span class="k">30440</span>  <span class="c">rotate the key, re-grant the rest — the ex-grantee is out</span>
+recover   <span class="k">10440</span>  <span class="c">rebuild the entire graph from one key on paper</span></div>
+  </div>
+</section>
+
+<div class="wrap"><div class="rule"></div></div>
+
+<!-- True today -->
+<section id="real">
+  <div class="wrap">
+    <span class="kicker">Not a whitepaper</span>
+    <h2 class="section-title">It runs today, on relays you already use.</h2>
+    <p class="lead">This isn't a proposal waiting on infrastructure. It's a complete draft with two
+      independent implementations that interoperate live on public relays — sharing nothing but the spec.</p>
+    <div class="facts">
+      <span class="fact">✓ Zero relay changes</span>
+      <span class="fact">✓ Two implementations — JS + Go</span>
+      <span class="fact">✓ Interop verified on public relays</span>
+      <span class="fact">✓ relay.damus.io · nos.lol · relay.primal.net</span>
+      <span class="fact">✓ Key-rotation revocation</span>
+      <span class="fact">✓ Recoverable from one key</span>
+    </div>
+    <div class="twocol">
+      <div class="stat">
+        <h4>Two engines, one spec</h4>
+        <p>A JavaScript reference library (isomorphic Node/browser) and a Go CLI on go-nostr. Each
+          decrypts the other's scopes, detects the other's rotations, and rebuilds the address book
+          from the other's Grant Index — 5 cross-implementation assertions, live.</p>
+      </div>
+      <div class="stat">
+        <h4>Try it in a minute</h4>
+        <p><code>npm run demo</code> narrates the protocol on an in-memory relay; <code>npm run smoke</code>
+          runs 11 assertions against real public relays; <code>npm run seed</code> plants a throwaway
+          graph and prints a login key. All in the repo.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap"><div class="rule"></div></div>
+
+<!-- What stands on it -->
+<section id="apps">
+  <div class="wrap">
+    <span class="kicker">The proof</span>
+    <h2 class="section-title">A family of apps already stands on it.</h2>
+    <p class="lead">The best argument for a primitive is what it carries. Each of these is a pure client —
+      no server, no build step — vendoring the same ~300-line library.</p>
+    <div class="apps">
+      <a class="app" href="https://jafairweather.github.io/noir/client/" target="_blank" rel="noopener" style="--a:#c39a56"><span class="dot"></span><b>Noir</b> — the flagship <span class="live">live</span></a>
+      <a class="app" href="https://jafairweather.github.io/nontact/" target="_blank" rel="noopener" style="--a:#8fae6a"><span class="dot"></span><b>Nontact</b> — address book <span class="live">live</span></a>
+      <a class="app" href="https://jafairweather.github.io/nvelope/app/" target="_blank" rel="noopener" style="--a:#9a83c0"><span class="dot"></span><b>Nvelope</b> — document sharing <span class="live">live</span></a>
+      <a class="app" href="https://jafairweather.github.io/notegate/" target="_blank" rel="noopener" style="--a:#7f95ad"><span class="dot"></span><b>Notegate</b> — tip intake <span class="live">live</span></a>
+      <a class="app" href="https://jafairweather.github.io/ntrigue/" target="_blank" rel="noopener" style="--a:#c07a9a"><span class="dot"></span><b>Ntrigue</b> — secrets as stakes <span class="live">live</span></a>
+      <a class="app" href="https://github.com/JAFairweather/nvoy" target="_blank" rel="noopener" style="--a:#6fa8a0"><span class="dot"></span><b>Nvoy</b> — agent delegation</a>
+      <a class="app" href="https://github.com/JAFairweather/nherit" target="_blank" rel="noopener" style="--a:#c0705a"><span class="dot"></span><b>Nherit</b> — succession</a>
+    </div>
+  </div>
+</section>
+
+<!-- CTA band -->
+<section class="band">
+  <div class="wrap">
+    <span class="kicker">Read it, run it, build on it</span>
+    <h2 class="section-title">Permissioned private data, without the permission-granter.</h2>
+    <p class="lead" style="margin: 18px auto 0;">The spec is complete, the code is public, the interop is
+      proven. What it needs now is your reading, your critique, and your apps.</p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/JAFairweather/nostr-scoped-data-grants/blob/main/SPEC.md">The specification</a>
+      <a class="btn ghost" href="https://github.com/JAFairweather/nostr-scoped-data-grants" target="_blank" rel="noopener">The repo ↗</a>
+      <a class="btn ghost" href="https://github.com/nostr-protocol/nips/pull/2411" target="_blank" rel="noopener">Weigh in on PR #2411 ↗</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="mono">The signature is the authorization · the rotation is the revocation</div>
+    <div class="flinks">
+      <a href="https://nave.pub">← The Nave</a>
+      <a href="#how">The mechanism</a>
+      <a href="https://github.com/JAFairweather/nostr-scoped-data-grants/blob/main/SPEC.md">SPEC.md</a>
+    </div>
+    <div class="whisper">Nscope — the ~300 lines everything else is built on.</div>
+  </div>
+</footer>
+
+</body>
+</html>
