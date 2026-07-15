@@ -43,6 +43,29 @@ requester:
   **chain**: use provider A's returned scope as a param-grant in a request to
   provider B, with revocation propagating along the chain.
 
+### A worked instance: channel-authority grants (Nact)
+
+Nact uses exactly this symmetry to bind an approver to a channel. The control
+plane's owner **invites** a Director to approve over some channel — that invite is
+a *request* for a **channel-authority grant**. The Director **fulfills** it by
+issuing a scope back: signed with their key, naming the verified channel and the
+scoped authority it carries (`{channel, delivery_proof, authority:{identities,
+tiers}, expires}`), gift-wrapped to the runtime's npub. The runtime dereferences
+it live and honors approvals over that channel only while the grant is live;
+the Director revokes by rotating that one channel's key.
+
+```
+  owner    → [ invite = request for channel authority ] → Director
+  Director → [ approve + issue channel-authority grant ] → runtime (Nactor)
+  runtime  → honors that channel's approvals only while the grant dereferences live
+```
+
+So "who may approve over which channel" is *itself* a request-that-becomes-a-grant:
+the invite solicits, the acceptance is the returned scope, and revocation is a key
+rotation the granter (the Director) owns. See
+[nact/docs/threat-model.md → "Channel authority as a scoped grant"](https://github.com/JAFairweather/nact/blob/main/docs/threat-model.md)
+and [nact/docs/architecture.md → "Director channel-authority grants"](https://github.com/JAFairweather/nact/blob/main/docs/architecture.md).
+
 ### What it would need
 
 A request event kind (or a tag convention over the existing grant kind) that
