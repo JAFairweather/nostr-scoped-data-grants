@@ -34,7 +34,7 @@ requester:
   an action (proposed, approved, fulfilled); fulfilling it produces a grant
   (scoped, live, revocable). The "approval" a provider gives is a signature
   authorizing assembly-and-return — the same shape as the human approval in
-  [nact](https://github.com/JAFairweather/nact).
+  [Nact](https://github.com/JAFairweather/nact).
 - **Revocation stays with the provider.** Because the response is a scope, the
   provider can rotate the response grant's key and revoke what it returned —
   symmetric with a granter revoking a recipient today.
