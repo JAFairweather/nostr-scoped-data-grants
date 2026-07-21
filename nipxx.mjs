@@ -184,6 +184,13 @@ export async function receiveGrants(relay, granteeSecret) {
     const { scope_key, scope_name } = JSON.parse(rumor.content)
     grants.push({
       publisher, scopeId, scopeName: scope_name, relayHint,
+      // Who actually issued this grant (the authenticated rumor author) —
+      // distinct from `publisher` (the a-tag's data-set owner). They differ
+      // when a grantee re-gifts a scope key it holds. Consumers SHOULD treat
+      // `author !== publisher` as a re-wrapped grant and decide deliberately
+      // (see FUTURE.md → delegation chains); this reference reader stays
+      // permissive and only exposes the distinction.
+      author: rumor.pubkey,
       generation: Number(rumor.tags.find(t => t[0] === 'v')?.[1] ?? 0),
       scopeKey: unb64(scope_key),
       issuedAt: rumor.created_at,
