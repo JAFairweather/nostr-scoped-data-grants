@@ -76,3 +76,67 @@ implementation experiments before any normative change.
 
 Companion note (the action side): [nact/DESIGN.md → "Two directions the
 primitive wants to grow"](https://github.com/JAFairweather/nact/blob/main/DESIGN.md).
+
+## Delegation chains, revocation cascade, and the attenuation north star
+
+What happens when a *grantee* wants to pass narrower access onward — the
+`root delegator → sub-issuer → leaf` chain a fleet or a per-user agent
+hierarchy needs? A working prototype (nvoy `test/regrant.mjs`, driven against
+both the reference lib and a conforming grantee runtime) pins where the current
+primitive lands, and the answer splits by mechanism:
+
+**Key re-wrap** — the grantee re-gifts the scope key it holds (a `kind:440`
+rumor it authors whose `a` tag still names the root publisher's scope).
+
+- Revocation cascade is **cryptographic**: one root rotation strands every
+  holder of the old key at once, including re-wrapped grantees the root
+  delegator never knew existed.
+- But attenuation is **impossible** (same key ⇒ whole payload), the delegator
+  cannot see or revoke an individual re-wrapped grantee, and the mechanism is
+  indistinguishable from key exfiltration — which is why conforming grantee
+  implementations already **reject** any grant whose rumor author differs from
+  the `a`-tag publisher, and why terms-bearing deployments treat
+  `redelegate:false` as forbidding exactly this (as an audit term).
+
+**Derived-scope sub-grant** — the sub-issuer publishes *its own* `kind:30440`
+(author = publisher, so every conforming receiver accepts) whose payload it
+projects — narrowed — from what it read upstream, and grants that onward under
+its own terms.
+
+- Attenuation **works** (a payload projection; the leaf never holds the root
+  key), per-leaf revocation **works** (rotate the derived key, re-grant
+  survivors), and the root chain is untouched by either.
+- Revocation cascade is **runtime-mediated, not cryptographic**: rotating the
+  root cuts the sub-issuer off, but leaves keep reading the sub-issuer's
+  derived scope — its last upstream snapshot — until the sub-issuer rotates it
+  away. The **sub-issuer obligation** (a conformance term in the spirit of
+  `no_persist` honesty): on finding your source scope `stale`/`missing`,
+  rotate your derived scopes with no survivors (optionally tombstone and send
+  `kind:441` notices). Staleness is bounded by the sub-issuer's re-read
+  interval, plus leaf-grant TTLs as defense in depth.
+
+So today the two halves of "real" delegation live in different mechanisms:
+cryptographic cascade without attenuation (re-wrap), or attenuation without
+cryptographic cascade (derived scopes). Deployments should use derived scopes
+and state the cascade bound honestly.
+
+Two consequences worth promoting toward the draft NIP:
+
+1. **Grant-side author verification.** The Security section already requires
+   verifying that a `kind:30440` replacement's signer matches its `a` tag; the
+   symmetric check on the *grant* side — a `kind:440` rumor whose author
+   differs from the `a`-tag publisher is a re-wrap, not the publisher's grant —
+   is currently implementation lore. The reference reader now exposes the
+   rumor author on each received grant (`author`) so consumers can make the
+   check; a future revision should consider making it normative (reject, or
+   surface-and-flag).
+
+2. **The attenuation north star.** The end state wants both halves at once: a
+   grantee derives a *narrower* capability from the grant it holds — fewer
+   fields, shorter TTL, no further delegation — such that the derived grant is
+   verifiable against the chain and dies cryptographically with it (macaroon-
+   style caveats, or per-field key trees where a scope key derives per-field
+   subkeys). That is a construction change (today's scope key is one symmetric
+   key over one payload) and belongs in a v2 exploration, not the current
+   draft. Until then, attenuation-by-projection with the sub-issuer obligation
+   is the honest, working answer.
