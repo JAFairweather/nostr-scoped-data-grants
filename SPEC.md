@@ -253,3 +253,7 @@ This profile raises an observer's cost; it does not buy unobservability. The rot
 - **Reusing the NIP-44 payload format with a raw key** avoids introducing a second encryption construction into the ecosystem.
 - **Unsigned gift-wrapped grants** follow NIP-17's deniability and metadata-privacy rationale; the grant graph is precisely the information this NIP exists to protect.
 - **No new relay features** keeps the barrier to deployment at zero: this NIP is implementable today by clients alone against existing relays.
+
+## Experimental v2 track (attenuable scopes)
+
+An experimental **parallel** construction — per-field key trees under `kind:31440`, specified separately in [SPEC-v2.md](SPEC-v2.md) — addresses this design's known ceiling (no cryptographic attenuation; whole-scope rotation; see [FUTURE.md](FUTURE.md), "the attenuation north star"): a grant there carries any subset of per-field subkeys derived from a root scope key, so an attenuated grantee cryptographically cannot read fields it was not granted, and one field can rotate without disturbing the rest. It coexists with `kind:30440`, is opt-in, and changes nothing in this document.

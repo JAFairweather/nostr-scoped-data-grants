@@ -7,10 +7,12 @@
     "demo": "node demo.mjs",
     "smoke": "node smoke.mjs",
     "smoke:local": "node smoke.mjs --local",
+    "smoke:v2": "node smoke-v2.mjs --local",
     "interop": "cd go && go build -o nipxx . && cd .. && node interop.mjs",
     "seed": "node seed.mjs"
   },
   "dependencies": {
+    "@noble/hashes": "2.0.1",
     "nostr-tools": "^2.0.0",
     "ws": "^8.0.0"
   },
