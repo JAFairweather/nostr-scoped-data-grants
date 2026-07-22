@@ -82,23 +82,45 @@ const symDecrypt = (ciphertext, scopeKey) => JSON.parse(nip44.v2.decrypt(ciphert
 
 // ---------------------------------------------------------------- publisher
 
+// Content sequence (SPEC "Freshness and rollback detection"): every publish
+// of a scope — content update or rotation — carries a strictly increasing
+// `u` tag, independent of `v` (the rotation generation). Being signed and
+// relay-visible, `u` lets a grantee recognize a served copy as older than
+// one already seen, without decrypting.
+
+/** Next content sequence after `prev` (absent/unknown counts as 0). */
+export const nextSeq = (prev) => (Number(prev) || 0) + 1
+
+// Per-process last-emitted `u` per (publisher, scope), so every publish path
+// bumps the sequence without threading state — same spirit as the monotonic
+// now() below. Spans one session only: across sessions, carry the last `u`
+// (e.g. in the Grant Index `issued` entry) and pass `seq` explicitly — the
+// strict-monotonicity duty is then the caller's.
+const seqs = new Map()
+
 /**
  * Publish (or replace) a Scoped Data Set.
  * `scopeId` should be opaque — semantic names in `d` tags leak disclosure
  * structure to relays. The human-readable name lives inside the ciphertext.
- * Returns the signed event plus whatever receipt the relay's publish
- * produces (e.g. ack counts from LiveRelay).
+ * `seq` is the content sequence for the `u` tag; when omitted it continues
+ * from this process's last publish of the scope. Returns the signed event,
+ * the `seq` used (persist it to bump from later), plus whatever receipt the
+ * relay's publish produces (e.g. ack counts from LiveRelay).
  */
-export async function publishScope(relay, publisherSecret, { scopeId, generation, scopeKey, payload }) {
+export async function publishScope(relay, publisherSecret, { scopeId, generation, scopeKey, payload, seq }) {
   const ts = now()
-  const event = await asSigner(publisherSecret).signEvent({
+  const signer = asSigner(publisherSecret)
+  const scopeRef = `${await signer.getPublicKey()}:${scopeId}`
+  if (seq == null) seq = nextSeq(seqs.get(scopeRef))
+  seqs.set(scopeRef, seq)
+  const event = await signer.signEvent({
     kind: KIND_DATA_SET,
     created_at: ts,
-    tags: [['d', scopeId], ['v', String(generation)]],
+    tags: [['d', scopeId], ['v', String(generation)], ['u', String(seq)]],
     content: symEncrypt({ ...payload, updated_at: ts }, scopeKey),
   })
   const receipt = await relay.publish(event)
-  return { event, ...receipt }
+  return { event, seq, ...receipt }
 }
 
 /**
@@ -133,13 +155,15 @@ export async function grant(relay, publisherSecret, granteePubkey,
  * cut off from all future updates.
  */
 export async function rotateScope(relay, publisherSecret,
-                                  { scopeId, generation, payload, scopeName, survivors }) {
+                                  { scopeId, generation, payload, scopeName, survivors, seq }) {
   const scopeKey = newScopeKey()
   const next = generation + 1
-  await publishScope(relay, publisherSecret, { scopeId, generation: next, scopeKey, payload })
+  // A rotation is also a publish, so `u` bumps too (tracker default, or the
+  // caller's explicit seq); the new mark is returned alongside the new key.
+  const pub = await publishScope(relay, publisherSecret, { scopeId, generation: next, scopeKey, payload, seq })
   for (const pubkey of survivors)
     await grant(relay, publisherSecret, pubkey, { scopeId, generation: next, scopeKey, scopeName })
-  return { scopeKey, generation: next }
+  return { scopeKey, generation: next, seq: pub.seq }
 }
 
 /**
@@ -149,10 +173,10 @@ export async function rotateScope(relay, publisherSecret,
  * kind-5 then asks relays to drop the tombstone too (advisory). Grantees see
  * generation supersession — indistinguishable from revocation, deliberately.
  */
-export async function deleteScope(relay, publisherSecret, { scopeId, generation }) {
+export async function deleteScope(relay, publisherSecret, { scopeId, generation, seq }) {
   const signer = asSigner(publisherSecret)
   await publishScope(relay, signer, {
-    scopeId, generation: generation + 1, scopeKey: newScopeKey(), payload: {},
+    scopeId, generation: generation + 1, scopeKey: newScopeKey(), payload: {}, seq,
   })
   const event = await signer.signEvent({
     kind: 5,
@@ -225,18 +249,35 @@ export function latestGrants(grants, { allowRewrapped = false } = {}) {
  * publisher's authoritative current event, never a snapshot.
  * Returns { status: 'ok', data } or { status: 'stale' } if the scope key has
  * been rotated past this grant (i.e. access to future updates was revoked).
+ * Both carry `generation`/`seq` — the event's (v, u) — for the caller to
+ * persist as its high-water mark.
+ *
+ * `highWater` is that persisted per-scope `{ v, u }` mark (SPEC "Freshness
+ * and rollback detection"): when the best event this fetch can see sits
+ * lexicographically below it, the relay set is serving a rolled-back copy —
+ * { status: 'rollback' } is returned instead of trusting what decrypts.
+ * That makes rollback detectable, not impossible: a relay can still
+ * withhold, and without a mark (or a relay carrying the newer event) there
+ * is no signal.
  */
-export async function fetchScope(relay, grantRecord) {
+export async function fetchScope(relay, grantRecord, { highWater } = {}) {
   const [event] = await relay.query({
     kinds: [KIND_DATA_SET], authors: [grantRecord.publisher], '#d': [grantRecord.scopeId],
   })
   if (!event) return { status: 'missing' }
   const generation = Number(event.tags.find(t => t[0] === 'v')?.[1] ?? 0)
-  if (generation > grantRecord.generation) return { status: 'stale', generation }
+  const uTag = event.tags.find(t => t[0] === 'u')?.[1]
+  const seq = uTag == null ? undefined : Number(uTag) // absent = pre-`u` event
+  // (v, u) lexicographically below the stored mark → rollback. An absent `u`
+  // compares as 0, so a pre-`u` copy served after a sequenced one is flagged.
+  if (highWater && (generation < highWater.v
+      || (generation === highWater.v && (seq ?? 0) < (highWater.u ?? 0))))
+    return { status: 'rollback', generation, seq }
+  if (generation > grantRecord.generation) return { status: 'stale', generation, seq }
   try {
-    return { status: 'ok', generation, data: symDecrypt(event.content, grantRecord.scopeKey) }
+    return { status: 'ok', generation, seq, data: symDecrypt(event.content, grantRecord.scopeKey) }
   } catch {
-    return { status: 'stale', generation } // MAC failure — wrong (rotated) key
+    return { status: 'stale', generation, seq } // MAC failure — wrong (rotated) key
   }
 }
 
@@ -285,19 +326,24 @@ export async function saveGrantIndex(relay, secret, index) {
 
 // Index entries use the spec's wire field names; these adapters convert to
 // and from the in-memory grant/scope records the rest of the lib speaks.
+// The optional content sequence rides as `u` (in-memory: `seq`): in `issued`
+// it is the publisher's last-emitted `u` for the scope (bump from it with
+// nextSeq); in `received` it is the grantee's persisted high-water. When the
+// record has no seq (e.g. built from a grant, which carries no `u`), JSON
+// serialization drops the field — absent means unknown, accept newest.
 export const toReceivedEntry = (g, petname, relays = []) => ({
-  a: `${KIND_DATA_SET}:${g.publisher}:${g.scopeId}`, v: g.generation,
+  a: `${KIND_DATA_SET}:${g.publisher}:${g.scopeId}`, v: g.generation, u: g.seq,
   key: b64(g.scopeKey), petname, relays,
 })
 export const fromReceivedEntry = (e) => {
   const [, publisher, scopeId] = e.a.split(':')
-  return { publisher, scopeId, generation: e.v, scopeKey: unb64(e.key), petname: e.petname }
+  return { publisher, scopeId, generation: e.v, seq: e.u, scopeKey: unb64(e.key), petname: e.petname }
 }
-export const toIssuedEntry = ({ scopeId, scopeName, generation, scopeKey }, grantees) => ({
-  scope: scopeId, scope_name: scopeName, v: generation, key: b64(scopeKey), grantees,
+export const toIssuedEntry = ({ scopeId, scopeName, generation, scopeKey, seq }, grantees) => ({
+  scope: scopeId, scope_name: scopeName, v: generation, u: seq, key: b64(scopeKey), grantees,
 })
 export const fromIssuedEntry = (e) => ({
-  scopeId: e.scope, scopeName: e.scope_name, generation: e.v,
+  scopeId: e.scope, scopeName: e.scope_name, generation: e.v, seq: e.u,
   scopeKey: unb64(e.key), grantees: e.grantees,
 })
 

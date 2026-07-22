@@ -45,7 +45,8 @@ An addressable event holding one scope's data as ciphertext. The `d` tag identif
   "pubkey": "<publisher-pubkey>",
   "tags": [
     ["d", "<scope-id>"],
-    ["v", "<scope-key-generation>"]
+    ["v", "<scope-key-generation>"],
+    ["u", "<content-seq>"]
   ],
   "content": "<symmetric-nip44-ciphertext>",
   ...
@@ -53,7 +54,8 @@ An addressable event holding one scope's data as ciphertext. The `d` tag identif
 ```
 
 - `d`: an opaque scope identifier. Publishers SHOULD use short opaque strings (e.g. random 8-char ids) rather than semantic names like `family`, since `d` tags are visible to relays and semantic names leak information about the publisher's disclosure structure. The human-readable scope name belongs inside the encrypted payload or the publisher's Grant Index.
-- `v`: an integer, incremented each time the scope key is rotated. This lets grantees detect that their key is stale without attempting decryption.
+- `v`: the scope's **rotation generation** — an integer, incremented each time the scope key is rotated (and only then; content updates do not change it). This lets grantees detect that their key is stale without attempting decryption.
+- `u`: the scope's **content sequence** — a strictly increasing integer, bumped on **every** publish of the scope (content updates *and* rotations), independent of `v`. `u` MUST be strictly greater than the `u` of any prior `kind:30440` for the same `(pubkey, d)`. Because it is a signed tag it is visible to relays without decryption, so a client can recognize a served copy as older than one it has already seen (see "Freshness and rollback detection").
 
 ### Payload encryption
 
@@ -80,6 +82,18 @@ The decrypted payload is a JSON object:
 Field names SHOULD follow vCard 4.0 (RFC 6350) property names in lowercase where an equivalent exists (`tel`, `email`, `adr`, `url`, `bday`, `org`, `title`), so that clients can interoperate with existing contact ecosystems. Arbitrary additional fields MAY be included; clients MUST ignore fields they do not understand.
 
 As with all addressable events, publishing a new `kind:30440` with the same `d` tag replaces the previous one. This is the mechanism that makes grants "live": grantees always dereference the current event.
+
+### Freshness and rollback detection
+
+The two counters have distinct jobs: `v` is the **rotation generation**, bumped only when the scope key rotates; `u` is the **content sequence**, bumped on every publish. A rotation therefore bumps both; a content update bumps only `u`.
+
+Replacement makes grants live, but a grantee talking to a single withholding relay could otherwise be pinned to an older, validly-signed event with no signal that a newer one exists. The `u` tag makes such rollback *detectable*:
+
+- Grantees SHOULD fetch a scope from at least two relays (the publisher's NIP-65 write relays, plus any grant relay hints) and accept the event with the highest `(u, created_at)`, compared lexicographically. The signed `u` outranks `created_at`, which is self-asserted and may be skewed or fuzzed.
+- Grantees SHOULD persist a per-scope high-water mark `(v, u)`, advanced from each accepted event, and MUST NOT downgrade to an event whose `(v, u)` is lexicographically lower than the stored mark. A lower value is a rollback signal: the client SHOULD warn and/or retry other relays rather than display the served copy as current. An event carrying no `u` tag compares as `u = 0` (so a pre-`u` copy served after a sequenced one is flagged too).
+- The mark is keyed by scope identity `(publisher-pubkey, d)`: if the scope's `d` changes (see metadata hardening, when present), the high-water mark resets with the new scope identity.
+
+Detection is the guarantee, not prevention: a relay can still withhold the newer event, and a grantee that has never seen the newer sequence — on any relay or in its mark — gets no signal (see Security 7).
 
 ## Data Grant (`kind:440`)
 
@@ -123,12 +137,12 @@ A prospective contact MAY request access by sending an ordinary NIP-17 direct me
 
 ## Updates, rotation, and revocation
 
-**Updating data.** The publisher re-encrypts the payload under the existing scope key and republishes `kind:30440`. No per-grantee action is required. Grantees SHOULD refetch data sets they hold grants for opportunistically (on app open, before displaying a contact, or on a periodic schedule).
+**Updating data.** The publisher re-encrypts the payload under the existing scope key and republishes `kind:30440` with a bumped `u` (same `v`). No per-grantee action is required. Grantees SHOULD refetch data sets they hold grants for opportunistically (on app open, before displaying a contact, or on a periodic schedule).
 
 **Revoking a grantee.** The publisher:
 
 1. Generates a new scope key; increments `v`.
-2. Republishes the `kind:30440` event encrypted under the new key.
+2. Republishes the `kind:30440` event encrypted under the new key (bumping `u`, as on every publish).
 3. Issues fresh `kind:440` grants (new `v`) to all *remaining* grantees.
 4. MAY send a `kind:441` revocation notice to the revoked party (gift-wrapped), containing the `a` tag of the affected scope, so their client can gracefully mark the contact data as no longer maintained. Publishers who prefer silent revocation simply skip this.
 
@@ -145,17 +159,19 @@ To make grants recoverable across clients with only the user's private key, both
 ```json
 {
   "issued": [
-    {"scope": "<scope-id>", "scope_name": "Personal", "v": 3,
+    {"scope": "<scope-id>", "scope_name": "Personal", "v": 3, "u": 12,
      "key": "<base64>", "grantees": ["<pubkey>", "..."]}
   ],
   "received": [
-    {"a": "30440:<pubkey>:<scope-id>", "v": 2, "key": "<base64>",
+    {"a": "30440:<pubkey>:<scope-id>", "v": 2, "u": 9, "key": "<base64>",
      "petname": "alice", "relays": ["wss://..."]}
   ]
 }
 ```
 
 For the publisher, `issued` is the authoritative record needed to perform rotations. For the grantee, `received` is effectively the private address book: a list of dereferenceable, self-updating contact cards. This event contains all key material and MUST never be published unencrypted.
+
+`u` is optional in both lists. In `issued` it records the last content sequence the publisher emitted for the scope, so the next publish — from any device or session — can use a strictly greater value. In `received` it is the grantee's persisted high-water mark (see "Freshness and rollback detection"). An absent `u` means unknown: accept the newest visible event, as pre-`u` clients do.
 
 ## Interaction with existing NIPs
 
@@ -173,7 +189,7 @@ For the publisher, `issued` is the authoritative record needed to perform rotati
 4. **Grant graph privacy.** Gift wrapping hides publisher↔grantee links from relays. Traffic analysis by a relay observing both the wrap delivery and a subsequent fetch of a specific `kind:30440` address could correlate; grantees SHOULD fetch via their normal read relays and MAY delay first fetch by a random interval.
 5. **Key loss.** Loss of the user's private key forfeits the Grant Index and therefore all issued and received grants. This NIP inherits nostr's key-management model; deployments serious about mainstream contact use cases should pair it with NIP-46 remote signing and/or social recovery schemes, which are out of scope here.
 6. **Malicious data set replacement.** Only the publisher can sign a replacement `kind:30440`; grantees MUST verify the event signature and that its pubkey matches the `a` tag before decrypting.
-7. **Relay withholding.** A relay can serve a stale `kind:30440` (rollback). The `updated_at` field inside the payload lets clients prefer the newest authenticated payload across multiple relays.
+7. **Relay withholding.** A relay can serve a stale `kind:30440` (rollback) or withhold it entirely. The signed `u` tag plus the persisted `(v, u)` high-water mark make rollback detectable without decryption, and multi-relay fanout makes it survivable whenever any queried relay carries the newer event (see "Freshness and rollback detection"); the `updated_at` field inside the payload corroborates after decryption. Detection has a limit: a grantee whose every relay withholds the newer event — and whose mark never advanced past the old one — sees no signal. Withholding, like erasure, cannot be prevented by protocol.
 
 ## Rationale
 

@@ -68,14 +68,23 @@ try {
   // Gopher, and each equals its a-tag publisher (first-party).
   check('Go and JS agree on grant author identity (author == a-tag publisher)',
     fromJs?.author === getPublicKey(alice) && fromGo?.author === getPublicKey(gopher))
+  // SPEC "Freshness and rollback detection": the content sequence rides the
+  // signed `u` tag, so each reader recovers it without decryption. JS
+  // published u=1 in step 1 (per-process auto-seq); Go published u=1 in
+  // step 2 (-seq default); each side reads the other's.
+  check('Go and JS agree on the content sequence (u) each other published',
+    fromJs?.seq === 1 && fromGo?.seq === 1)
 
   console.log('\n3. JS rotates its scope key → Go detects supersession')
   await publishScope(relay, alice, { ...scope, generation: 2, scopeKey: newScopeKey(),
     payload: { name: 'Basic', fields: { display_name: 'InteropAlice' } } })
   await settle()
   goBook = go('book', '-sk', hex(bob)) ?? []
-  check('Go marks JS-rotated scope stale',
-    goBook.find(e => e.publisher === getPublicKey(alice))?.status === 'stale')
+  // A rotation is also a publish, so JS's auto-seq bumped u to 2 — Go must
+  // read the rotated event's sequence along with the supersession.
+  check('Go marks JS-rotated scope stale and reads its bumped u=2',
+    goBook.find(e => e.publisher === getPublicKey(alice))?.status === 'stale'
+    && goBook.find(e => e.publisher === getPublicKey(alice))?.seq === 2)
 
   console.log('\n4. Go writes the Grant Index → JS recovers from it')
   go('index-save', '-sk', hex(bob), '-petname', 'friends')

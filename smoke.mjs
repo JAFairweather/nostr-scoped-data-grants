@@ -151,6 +151,51 @@ try {
   check('deleted scope reads as revoked, not ok',
     bobBook4.find(e => e.scopeId === personal.scopeId)?.status !== 'ok')
 
+  console.log('\n9. Rollback detection (u high-water mark)')
+  // A withholding relay still serving an older copy is invisible to
+  // decryption alone: the old event is validly signed and the unrotated key
+  // still fits. The signed `u` tag plus a persisted (v, u) high-water mark
+  // turns that silent pin into an explicit 'rollback' — detectable, not
+  // impossible (a relay can always withhold; SPEC Security 7). The frozen
+  // relay is simulated in-memory in both modes; `relay` stays live on live.
+  const roll = { scopeId: 'sr' + Math.random().toString(36).slice(2, 8), generation: 1, scopeKey: newScopeKey() }
+  const frozen = new LocalRelay(new Relay())   // the withholding relay: only ever sees u=1
+  await publishScope(frozen, alice, { ...roll, payload: { name: 'Roll', fields: { note: 'old' } }, seq: 1 })
+  await publishScope(relay, alice, { ...roll, payload: { name: 'Roll', fields: { note: 'new' } }, seq: 2 })
+  await settle()
+  const rollRec = { publisher: getPublicKey(alice), scopeId: roll.scopeId, generation: 1, scopeKey: roll.scopeKey }
+  const seen = await fetchScope(relay, rollRec)
+  check('fetch reports the content sequence (u=2) to persist as high-water',
+    seen.status === 'ok' && seen.seq === 2 && seen.data.fields.note === 'new')
+  const pinned = await fetchScope(frozen, rollRec)
+  check('without a mark the rolled-back copy reads ok (the pin is silent)',
+    pinned.status === 'ok' && pinned.data.fields.note === 'old')
+  const caught = await fetchScope(frozen, rollRec, { highWater: { v: seen.generation, u: seen.seq } })
+  check('with the (v,u) high-water mark the downgrade reads rollback',
+    caught.status === 'rollback' && caught.seq === 1)
+  const entry = toReceivedEntry({ ...rollRec, seq: seen.seq }, 'alice')
+  check('high-water (v,u) round-trips through a Grant Index received entry',
+    entry.u === 2 && fromReceivedEntry(entry).seq === 2)
+
+  console.log('\n10. Multi-relay fanout prefers max (u, created_at)')
+  // Relay A holds u=2; relay B holds only u=1 — published later, so B's
+  // copy carries the NEWER created_at (a skewed device clock, a fuzzed
+  // timestamp). created_at ordering would surface B's stale copy; the
+  // fanout comparator trusts the signed content sequence first. In-memory
+  // relay pair in both modes for determinism — on live, step 9 already
+  // drives the same comparator through LiveRelay.query.
+  const A = new Relay(), B = new Relay()
+  const fan = { scopeId: 'sf' + Math.random().toString(36).slice(2, 8), generation: 1, scopeKey: newScopeKey() }
+  await publishScope(new LocalRelay(A), alice, { ...fan, payload: { name: 'Fan', fields: { note: 'current' } }, seq: 2 })
+  await publishScope(new LocalRelay(B), alice, { ...fan, payload: { name: 'Fan', fields: { note: 'lagging' } }, seq: 1 })
+  const fanRec = { publisher: getPublicKey(alice), scopeId: fan.scopeId, generation: 1, scopeKey: fan.scopeKey }
+  const merged = await fetchScope(new LocalRelay(A, B), fanRec)
+  check("fanout across A+B returns u=2 despite B's newer created_at",
+    merged.status === 'ok' && merged.seq === 2 && merged.data.fields.note === 'current')
+  const behind = await fetchScope(new LocalRelay(B), fanRec, { highWater: { v: 1, u: merged.seq } })
+  check('relay B alone, below the fanout-learned mark, reads rollback',
+    behind.status === 'rollback')
+
   console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m`)
   relay.close()
   process.exit(failed === 0 ? 0 : 1)

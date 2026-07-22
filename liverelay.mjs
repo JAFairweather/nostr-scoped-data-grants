@@ -10,6 +10,15 @@ if (typeof WebSocket === 'undefined') {
   useWebSocketImplementation(WS)
 }
 
+// Freshness order (SPEC "Freshness and rollback detection"): the signed
+// content sequence `u` outranks created_at, which is self-asserted and may
+// be skewed or fuzzed — so a relay serving a rolled-back data set cannot
+// shadow a newer sequence seen on another relay. Events without a `u` tag
+// (every non-30440 kind, pre-`u` data sets) compare as 0, leaving their
+// ordering — newest created_at first — unchanged.
+const uOf = (e) => Number(e.tags.find(t => t[0] === 'u')?.[1] ?? 0)
+const byFreshness = (a, b) => (uOf(b) - uOf(a)) || (b.created_at - a.created_at)
+
 export class LiveRelay {
   constructor(urls) {
     this.urls = urls
@@ -32,22 +41,34 @@ export class LiveRelay {
     return { acks, of: this.urls.length, rejections }
   }
 
-  /** Query all relays, newest first, deduplicated by event id. */
+  /** Multi-relay fanout: query all relays, merge (deduplicated by event
+   *  id), freshest first — max (u, created_at). */
   async query(filter) {
     const events = await this.pool.querySync(this.urls, filter, { maxWait: 4000 })
     const seen = new Set()
     return events
       .filter(e => !seen.has(e.id) && seen.add(e.id))
-      .sort((a, b) => b.created_at - a.created_at)
+      .sort(byFreshness)
   }
 
   close() { this.pool.close(this.urls) }
 }
 
-/** Wrap the synchronous in-memory relay in the same async interface. */
+/** Wrap synchronous in-memory relay(s) in the same async interface. Several
+ *  inners make a local multi-relay: publish fans out to all, query merges
+ *  across all — the same id-dedupe and (u, created_at) preference as
+ *  LiveRelay, so fanout freshness is testable deterministically. */
 export class LocalRelay {
-  constructor(inner) { this.inner = inner }
-  async publish(event) { this.inner.publish(event); return { acks: 1, of: 1, rejections: [] } }
-  async query(filter) { return this.inner.query(filter) }
+  constructor(...inners) { this.inners = inners }
+  async publish(event) {
+    for (const r of this.inners) r.publish(event)
+    return { acks: this.inners.length, of: this.inners.length, rejections: [] }
+  }
+  async query(filter) {
+    const seen = new Set()
+    return this.inners.flatMap(r => r.query(filter))
+      .filter(e => !seen.has(e.id) && seen.add(e.id))
+      .sort(byFreshness)
+  }
   close() {}
 }
