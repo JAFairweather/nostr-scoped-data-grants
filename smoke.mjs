@@ -8,14 +8,15 @@
 // data only — everything published is ciphertext, but treat public relays
 // as public.
 
-import { generateSecretKey, getPublicKey, nip59 } from 'nostr-tools'
+import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey, nip44, nip59 } from 'nostr-tools'
 import { Relay } from './relay.mjs'
 import { LiveRelay, LocalRelay } from './liverelay.mjs'
 import {
-  KIND_DATA_SET, KIND_GRANT,
+  KIND_DATA_SET, KIND_GRANT, WRAP_OVERLAP,
   newScopeKey, publishScope, grant, rotateScope, deleteScope, addressBook,
-  receiveGrants, latestGrants, fetchScope,
-  saveGrantIndex, loadGrantIndex, toReceivedEntry, fromReceivedEntry,
+  receiveGrants, latestGrants, fetchScope, padTo, jitterFetch,
+  saveGrantIndex, loadGrantIndex, mergeGrantIndex, reconcile,
+  toReceivedEntry, fromReceivedEntry, toIssuedEntry,
 } from './nipxx.mjs'
 
 const DEFAULT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net']
@@ -37,6 +38,15 @@ const check = (name, ok, detail = '') => {
   console.log(`  ${ok ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m'}  ${name}${detail ? ` — ${detail}` : ''}`)
   ok ? passed++ : failed++
 }
+
+/** Pass-through relay recording every query filter, so a test can see
+ *  whether a scan was incremental (the 1059 filter carried `since`)
+ *  without instrumenting the lib. Works over LocalRelay and LiveRelay. */
+const spy = (inner) => ({
+  filters: [],
+  publish: (e) => inner.publish(e),
+  query(f) { this.filters.push(f); return inner.query(f) },
+})
 
 const alice = generateSecretKey()
 const bob = generateSecretKey()
@@ -195,6 +205,370 @@ try {
   const behind = await fetchScope(new LocalRelay(B), fanRec, { highWater: { v: 1, u: merged.seq } })
   check('relay B alone, below the fanout-learned mark, reads rollback',
     behind.status === 'rollback')
+
+  console.log('\n11. Incremental grantee inbox (warm start + since cursor)')
+  // Grants share the 1059 inbox with NIP-17 DMs and the inner kind is
+  // encrypted, so the relay can never be asked for "grants only" — what P4
+  // bounds is the scan, via the inbox cursor. The correctness hazard is
+  // NIP-59's timestamp fuzz: a wrap delivered AFTER a scan can be
+  // timestamped up to two days BEFORE everything that scan saw, so a naive
+  // since = checkpoint silently loses it. Deterministic here: the late wrap
+  // is hand-built with created_at pinned one hour behind the checkpoint.
+  const full = await receiveGrants(relay, bob)
+  const cursor = full.cursor
+  const bobWraps = await relay.query({ kinds: [1059], '#p': [getPublicKey(bob)] })
+  check('full scan returns the cursor to persist (since = max wrap created_at)',
+    cursor.since === Math.max(...bobWraps.map(w => w.created_at))
+    && cursor.ids.length === bobWraps.length)
+  // Persist cache + cursor in ONE index write (a cursor ahead of its cache
+  // would hide grants), then warm-start from the round-tripped index.
+  await saveGrantIndex(relay, bob, {
+    issued: [],
+    received: latestGrants(full).map(g => toReceivedEntry(g, 'alice')),
+    inbox: cursor,
+  })
+  await settle()
+  const idx = await loadGrantIndex(relay, bob)
+  check('inbox cursor round-trips through the Grant Index', idx.inbox?.since === cursor.since)
+  const spyWarm = spy(relay)
+  const warmBook = await addressBook(spyWarm, bob, { index: idx })
+  const shape = (b) => b.map(e => `${e.publisher.slice(0, 8)}:${e.scopeId}:${e.status}`).sort().join(' ')
+  check('warm start from the index equals the full-scan address book',
+    shape(warmBook) === shape(await addressBook(relay, bob)))
+  const warmSince = spyWarm.filters.find(f => f.kinds?.includes(1059))?.since
+  check('warm-start wrap scan was incremental: 1059 filter carried since = checkpoint − overlap',
+    warmSince === cursor.since - WRAP_OVERLAP)
+  check('nothing new → every in-window wrap deduped by id, cursor unchanged',
+    warmBook.cursor.since === cursor.since
+    && [...warmBook.cursor.ids].sort().join() === [...cursor.ids].sort().join())
+
+  // A grant "delivered" after the checkpoint but timestamped inside the
+  // overlap window — nipxx's own giftWrap fuzzes randomly, so build the
+  // wrap by hand (same NIP-59 construction) to pin created_at.
+  const late = { scopeId: 'si' + Math.random().toString(36).slice(2, 8), generation: 1, scopeKey: newScopeKey() }
+  await publishScope(relay, alice, { ...late, payload: { name: 'Inbox', fields: { note: 'late delivery' } } })
+  const backTs = cursor.since - 3600
+  const conv = nip44.v2.utils.getConversationKey
+  const rumor = {
+    pubkey: getPublicKey(alice), kind: KIND_GRANT, created_at: backTs,
+    tags: [['a', `${KIND_DATA_SET}:${getPublicKey(alice)}:${late.scopeId}`, ''], ['v', '1']],
+    content: JSON.stringify({ scope_key: Buffer.from(late.scopeKey).toString('base64'), scope_name: 'Inbox' }),
+  }
+  rumor.id = getEventHash(rumor)
+  const seal = finalizeEvent({ kind: 13, created_at: backTs, tags: [],
+    content: nip44.v2.encrypt(JSON.stringify(rumor), conv(alice, getPublicKey(bob))) }, alice)
+  const eph = generateSecretKey()
+  const lateWrap = finalizeEvent({ kind: 1059, created_at: backTs, tags: [['p', getPublicKey(bob)]],
+    content: nip44.v2.encrypt(JSON.stringify(seal), conv(eph, getPublicKey(bob))) }, eph)
+  await relay.publish(lateWrap)
+  await settle()
+  const naive = await relay.query({ kinds: [1059], '#p': [getPublicKey(bob)], since: cursor.since })
+  check('naive since = checkpoint MISSES the backdated wrap (the bug P4 must not have)',
+    !naive.some(w => w.id === lateWrap.id))
+  const inc = await receiveGrants(relay, bob, { since: cursor.since, seenIds: cursor.ids })
+  check('incremental scan (checkpoint − overlap) returns exactly the new grant',
+    inc.length === 1 && inc[0].scopeId === late.scopeId
+    && inc.cursor.since === cursor.since && inc.cursor.ids.includes(lateWrap.id))
+  const spyMerge = spy(relay)
+  const mergedBook = await addressBook(spyMerge, bob, { index: idx })
+  check('merged warm book carries old and new scopes — still no full re-scan',
+    mergedBook.find(e => e.scopeId === late.scopeId)?.data?.fields?.note === 'late delivery'
+    && mergedBook.find(e => e.scopeId === basic.scopeId)?.status === 'ok'
+    && spyMerge.filters.find(f => f.kinds?.includes(1059))?.since === cursor.since - WRAP_OVERLAP)
+  const again = await receiveGrants(relay, bob, { since: inc.cursor.since, seenIds: inc.cursor.ids })
+  check('overlapping re-scan double-processes nothing (dedup by wrap id)',
+    again.length === 0 && again.cursor.since === inc.cursor.since)
+
+  console.log('\n12. Metadata hardening (d rotates with the key; padding; jitter)')
+  // Weakness 7: every payload is ciphertext, yet a relay watching a STABLE
+  // opaque d accumulates the scope's whole update history ("this scope
+  // changed 47 times"). Rotation already re-grants every survivor, so
+  // moving the scope to a fresh d at the same time is free — the new
+  // address rides in the same gift wrap as the new key — and the old
+  // address is stranded behind a tombstone that tells a revoked watcher
+  // nothing. The in-memory observer below records what an adversarial
+  // operator sees, in both modes; the grantee flow runs against `relay`.
+  const observer = new Relay()
+  const observed = {   // every publish lands on the main relay AND the observer
+    publish: async (e) => { observer.publish(e); return relay.publish(e) },
+    query: (f) => relay.query(f),
+  }
+  const dave = generateSecretKey(), erin = generateSecretKey()
+  const dOld = 'sm' + Math.random().toString(36).slice(2, 8)
+  const dNew = 'sn' + Math.random().toString(36).slice(2, 8)
+  const meta = { scopeId: dOld, generation: 1, scopeKey: newScopeKey() }
+  await publishScope(observed, alice, { ...meta, payload: { name: 'Meta', fields: { display_name: 'HardAlice', note: 'generation one' } } })  // u=1
+  await grant(relay, alice, getPublicKey(dave), { ...meta, scopeName: 'Meta' })
+  await grant(relay, alice, getPublicKey(erin), { ...meta, scopeName: 'Meta' })
+  await publishScope(observed, alice, { ...meta, payload: { name: 'Meta', fields: { display_name: 'HardAlice', note: 'generation one, edited' } } })  // u=2: history accrues under dOld
+  await settle()
+  const daveFull = await receiveGrants(relay, dave)
+  await saveGrantIndex(relay, dave, {   // pre-move warm cache: OLD address + cursor
+    issued: [],
+    received: latestGrants(daveFull).map(g => toReceivedEntry(g, 'alice')),
+    inbox: daveFull.cursor,
+  })
+  const before = observer.observerView().filter(e => e.kind === KIND_DATA_SET).map(e => e.d)
+  // Revoke Erin AND move the scope: the same rotation call, one extra option.
+  const moved = await rotateScope(observed, alice, {
+    scopeId: dOld, generation: 1,
+    payload: { name: 'Meta', fields: { display_name: 'HardAlice', note: 'generation two' } },
+    scopeName: 'Meta', survivors: [getPublicKey(dave)], newScopeId: dNew,
+  })
+  await settle()
+  check('d-rotation returns the moved identity: new scopeId, bumped v, RESTARTED u',
+    moved.scopeId === dNew && moved.generation === 2 && moved.seq === 1)
+  const daveBook = await addressBook(relay, dave)
+  const followed = daveBook.find(e => e.scopeId === dNew)
+  check('survivor follows to the new address seamlessly via the re-grant (same wrap as the key)',
+    followed?.status === 'ok' && followed?.generation === 2 && followed?.scopeName === 'Meta'
+    && followed?.data?.fields?.note === 'generation two')
+  const erinBook = await addressBook(relay, erin)
+  check('revoked watcher of the tombstoned address learns nothing: stale, no data, no pointer to the new d',
+    erinBook.length === 1 && erinBook[0].scopeId === dOld
+    && erinBook[0].status === 'stale' && erinBook[0].data == null)
+  // High-water marks are keyed by (pubkey, d): the moved scope is a NEW
+  // identity, starting with no mark, so its restarted u=1 reads ok…
+  const freshFetch = await fetchScope(relay, followed)
+  check('fresh identity reads ok at u=1 — no mark carries over, no false rollback',
+    freshFetch.status === 'ok' && freshFetch.generation === 2 && freshFetch.seq === 1)
+  // …and here is why SPEC forbids carrying a mark across the d change: the
+  // old identity's tombstone shares the bumped v=2 with a HIGHER u (3), so
+  // a carried mark would misread the restarted sequence as a downgrade.
+  const carried = await fetchScope(relay, followed, { highWater: { v: 2, u: 3 } })
+  check('a (wrongly) carried old-identity mark would false-flag rollback — hence per-(pubkey,d) marks',
+    carried.status === 'rollback')
+  // The old identity stays monotone to the end: the tombstone bumped (v, u),
+  // so against the old mark it reads supersession (stale), never rollback.
+  const strand = await fetchScope(relay,
+    { publisher: getPublicKey(alice), scopeId: dOld, generation: 1, scopeKey: meta.scopeKey },
+    { highWater: { v: 1, u: 2 } })
+  check('tombstone under the old d reads stale against the old mark (monotone, no rollback)',
+    strand.status === 'stale' && strand.seq === 3)
+  // P4 warm cache across the move: the cached entry names the OLD address;
+  // the re-grant arrives through the ordinary incremental wrap scan and
+  // supersedes it — same publisher, same scope_name lineage, next
+  // generation, new a/d — with still no full re-scan.
+  const daveIdx = await loadGrantIndex(relay, dave)
+  const spyMove = spy(relay)
+  const warmMoved = await addressBook(spyMove, dave, { index: daveIdx })
+  check('warm cache: re-grant supersedes the cached old address — new d ok, old d stale, no full re-scan',
+    warmMoved.find(e => e.scopeId === dNew)?.status === 'ok'
+    && warmMoved.find(e => e.scopeId === dOld)?.status === 'stale'
+    && spyMove.filters.find(f => f.kinds?.includes(1059))?.since === daveIdx.inbox.since - WRAP_OVERLAP)
+  const after = observer.observerView().filter(e => e.kind === KIND_DATA_SET)
+  check("observer's longitudinal view broke: the live scope's d changed across generations",
+    before.includes(dOld) && !before.includes(dNew)
+    && after.some(e => e.d === dNew) && after.some(e => e.d === dOld))
+  // Padding to coarse buckets. NIP-44's own padding is fine-grained, so a
+  // field edit can hop size classes; padTo pins differently sized payloads
+  // into ONE publisher-chosen bucket. Construction is pure client side —
+  // in-memory relay in both modes, asserting on the signed events.
+  const padRelay = new LocalRelay(new Relay())
+  const padKey = newScopeKey()
+  const small = { name: 'Pad', fields: { note: 'short' } }
+  const big = { name: 'Pad', fields: { note: 'x'.repeat(400) } }
+  const rawS = await publishScope(padRelay, alice, { scopeId: 'pa1', generation: 1, scopeKey: newScopeKey(), payload: small })
+  const rawB = await publishScope(padRelay, alice, { scopeId: 'pa2', generation: 1, scopeKey: newScopeKey(), payload: big })
+  check('unpadded, the two payloads sit in different observable size classes (the leak)',
+    rawS.event.content.length !== rawB.event.content.length)
+  const padS = await publishScope(padRelay, alice, { scopeId: 'pa3', generation: 1, scopeKey: padKey, payload: padTo(small, 1024) })
+  const padB = await publishScope(padRelay, alice, { scopeId: 'pa4', generation: 1, scopeKey: newScopeKey(), payload: padTo(big, 1024) })
+  check('padTo(1024) puts both in one size class: equal ciphertext length',
+    padS.event.content.length === padB.event.content.length)
+  const padRec = { publisher: getPublicKey(alice), scopeId: 'pa3', generation: 1, scopeKey: padKey }
+  const padded = await fetchScope(padRelay, padRec)
+  check('padding is transparent to readers: fields intact, pad ignored',
+    padded.status === 'ok' && padded.data.fields.note === 'short')
+  // Fetch jitter: defer, then pass the result through untouched.
+  const t0 = Date.now()
+  const viaJitter = await jitterFetch(() => fetchScope(padRelay, padRec), 250)
+  check('jitterFetch defers the fetch and passes the result through',
+    viaJitter.status === 'ok' && viaJitter.data.fields.note === 'short' && Date.now() - t0 < 10_000)
+
+  console.log('\n13. Multi-device publisher consistency (Lamport v, deterministic winner, reconcile, mergeable index)')
+  // Weakness 5: `v` is uncoordinated and the Grant Index was last-write-
+  // wins. Two devices rotating one scope concurrently both pick v+1 with
+  // different keys — survivors re-granted by the losing device silently
+  // read stale — and concurrent index writes clobber each other. The races
+  // are staged with one in-memory relay per device (true concurrency:
+  // neither device sees the other's events before publishing), then
+  // cross-synced in BOTH arrival orders; deterministic in both modes. What
+  // P3 buys is convergence for HONEST devices sharing a key — not
+  // byzantine tolerance: a malicious co-holder of the publisher key can
+  // sign anything the key can sign, and no client rule constrains it.
+  const devA = new Relay(), devB = new Relay()      // each device's own view
+  const syncAB = new Relay(), syncBA = new Relay()  // converged views, opposite arrival orders
+  const replay = (dst, ...srcs) => srcs.forEach(src => src.events.forEach(e => dst.publish(e)))
+  const b64k = (k) => Buffer.from(k).toString('base64')
+  const decrypts = (ct, key) => { try { nip44.v2.decrypt(ct, key); return true } catch { return false } }
+  const frank = generateSecretKey(), grace = generateSecretKey()
+  const md = { scopeId: 'sv' + Math.random().toString(36).slice(2, 8), generation: 1, scopeKey: newScopeKey() }
+  await publishScope(new LocalRelay(devA, devB, syncAB, syncBA), alice,
+    { ...md, payload: { name: 'Multi', fields: { display_name: 'DeviceAlice', note: 'seed' } } })
+  // Concurrent rotation: the phone revokes with survivor Frank; the laptop,
+  // holding a divergent roster, rotates with survivor Grace. Each Lamport-
+  // picks max(observed 1) + 1 — the same v=2, two different keys.
+  const rotA = await rotateScope(new LocalRelay(devA), alice, {
+    scopeId: md.scopeId, generation: 1, scopeName: 'Multi', seq: 2,
+    payload: { name: 'Multi', fields: { display_name: 'DeviceAlice', note: 'from the phone' } },
+    survivors: [getPublicKey(frank)],
+  })
+  const rotB = await rotateScope(new LocalRelay(devB), alice, {
+    scopeId: md.scopeId, generation: 1, scopeName: 'Multi', seq: 2,
+    payload: { name: 'Multi', fields: { display_name: 'DeviceAlice', note: 'from the laptop' } },
+    survivors: [getPublicKey(grace)],
+  })
+  check('both devices Lamport-pick the same v — the collision (v=2, different keys)',
+    rotA.generation === 2 && rotB.generation === 2 && b64k(rotA.scopeKey) !== b64k(rotB.scopeKey))
+  replay(syncAB, devA, devB)  // the relay set converges, in opposite arrival orders
+  replay(syncBA, devB, devA)
+  const survivor = (r) => r.query({ kinds: [KIND_DATA_SET], authors: [getPublicKey(alice)], '#d': [md.scopeId] })
+  const [sAB] = survivor(syncAB), [sBA] = survivor(syncBA)
+  check('exactly one 30440 survives per NIP-01 — the same winner in both arrival orders',
+    survivor(syncAB).length === 1 && survivor(syncBA).length === 1 && sAB.id === sBA.id)
+  check("the winner is the later rotation (max created_at); its key — the laptop's — is authoritative",
+    decrypts(sAB.content, rotB.scopeKey) && !decrypts(sAB.content, rotA.scopeKey))
+  const shared = new LocalRelay(syncAB)
+  const frankBook = await addressBook(shared, frank)
+  check('survivor granted by the LOSING device holds the losing key: stale (same-v MAC fail) — detected, not silent',
+    frankBook.length === 1 && frankBook[0].generation === 2 && frankBook[0].status === 'stale')
+  check('survivor granted by the winning device reads ok',
+    (await addressBook(shared, grace))[0]?.status === 'ok')
+  // The mergeable index is what surfaces the collision. Fixed mtimes keep
+  // the stage deterministic: the laptop's entry is the later modification.
+  const idxA = { issued: [toIssuedEntry({ scopeName: 'Multi', ...rotA, mtime: 1000 }, [getPublicKey(frank)])], received: [] }
+  const idxB = { issued: [toIssuedEntry({ scopeName: 'Multi', ...rotB, mtime: 1001 }, [getPublicKey(grace)])], received: [] }
+  const localMerge = mergeGrantIndex(idxA, idxB)
+  check('index merge: ONE issued entry survives (greater mtime), flagged conflicted, grantees UNIONED — and the merge commutes',
+    localMerge.issued.length === 1 && localMerge.issued[0].key === b64k(rotB.scopeKey)
+    && localMerge.issued[0].conflicted === true
+    && [getPublicKey(frank), getPublicKey(grace)].every(p => localMerge.issued[0].grantees.includes(p))
+    && JSON.stringify(mergeGrantIndex(idxB, idxA)) === JSON.stringify(localMerge))
+  const loserView = await reconcile(shared, alice, idxA)
+  check('the losing device detects it lost (same-v MAC fail against the survivor) and flags its entry for the next merge',
+    loserView.issued[0].conflicted === true)
+  // Concurrent index writes through the relay: the phone saves; the
+  // laptop's save must load-merge-publish, never overwrite (pre-P3 the
+  // second write silently dropped Frank).
+  await saveGrantIndex(shared, alice, idxA)
+  await saveGrantIndex(shared, alice, idxB)
+  const published = await loadGrantIndex(shared, alice)
+  check("merge-on-write: the second device's index write carries BOTH devices' edits — nothing clobbered",
+    published.issued.length === 1 && published.issued[0].conflicted === true
+    && [getPublicKey(frank), getPublicKey(grace)].every(p => published.issued[0].grantees.includes(p)))
+  // Reconcile from the merged index: the device holding the authoritative
+  // key re-grants it — same v, later issuedAt — to the whole grantee union.
+  const reconciled = await reconcile(shared, alice, published)
+  await saveGrantIndex(shared, alice, reconciled)
+  check('reconcile re-grants the authoritative key and clears the flag',
+    reconciled.issued[0].conflicted === undefined && reconciled.issued[0].key === b64k(rotB.scopeKey))
+  const frankAfter = await addressBook(shared, frank)
+  check('the stranded survivor recovers with no action of his own: latest-issued grant at equal v wins → ok — no permanent stale',
+    frankAfter.length === 1 && frankAfter[0].status === 'ok'
+    && frankAfter[0].data.fields.note === 'from the laptop')
+  // Received-side divergence, tombstones, and the cursor: one device adds
+  // a contact while another removes one — removal is a TOMBSTONE, not an
+  // omission, so a lagging device's merge cannot resurrect it.
+  const m1 = mergeGrantIndex(
+    { issued: [], received: [{ a: '30440:pub:s1', v: 1, key: 'K1', mtime: 100 },
+                             { a: '30440:pub:s2', v: 1, key: 'K2', mtime: 300 }],
+      inbox: { since: 100, ids: ['w1', 'w2'] } },
+    { issued: [], received: [{ a: '30440:pub:s1', v: 1, key: 'K1', mtime: 100 },
+                             { a: '30440:pub:s3', deleted: true, mtime: 200 }],
+      inbox: { since: 200, ids: ['w2', 'w3'] } })
+  check("divergent received edits merge without loss: union carries both devices' entries, tombstone standing",
+    m1.received.length === 3 && m1.received.some(e => e.a.endsWith(':s2'))
+    && m1.received.find(e => e.a.endsWith(':s3'))?.deleted === true)
+  check('inbox cursor merges by max(since) + id union',
+    m1.inbox.since === 200 && ['w1', 'w2', 'w3'].every(id => m1.inbox.ids.includes(id)))
+  check('a lagging device merging later cannot resurrect the tombstoned entry (max mtime keeps the tombstone)',
+    mergeGrantIndex(m1, { issued: [], received: [{ a: '30440:pub:s3', v: 1, key: 'K3', mtime: 100 }] })
+      .received.find(e => e.a.endsWith(':s3'))?.deleted === true)
+  // Tombstones are carried, never dereferenced: Frank's index round-trips
+  // one and his warm-start book skips it.
+  const fg = await receiveGrants(shared, frank)
+  await saveGrantIndex(shared, frank, {
+    issued: [],
+    received: [...latestGrants(fg).map(g => toReceivedEntry(g, 'alice')),
+               { a: `${KIND_DATA_SET}:${getPublicKey(alice)}:gone`, deleted: true, mtime: 400 }],
+    inbox: fg.cursor,
+  })
+  const frankIdx = await loadGrantIndex(shared, frank)
+  const frankWarm = await addressBook(shared, frank, { index: frankIdx })
+  check('tombstoned entries ride the index but are never dereferenced (warm start skips them)',
+    frankIdx.received.some(e => e.deleted) && frankWarm.every(e => e.scopeId !== 'gone')
+    && frankWarm.find(e => e.scopeId === md.scopeId)?.status === 'ok')
+  // The sharpest tie: rivals equal in created_at too (two devices within
+  // one second). NIP-01 keeps the lexicographically LOWEST id, and the
+  // freshness comparator ends in the same tiebreak — so every relay
+  // (either arrival order) and every fanout reader (either half-view)
+  // lands on the same event without coordination.
+  const tieId = 'st' + Math.random().toString(36).slice(2, 8)
+  const rival = (note) => finalizeEvent({
+    kind: KIND_DATA_SET, created_at: 1900000000,
+    tags: [['d', tieId], ['v', '2'], ['u', '2']],
+    content: nip44.v2.encrypt(JSON.stringify({ name: 'Tie', fields: { note } }), newScopeKey()),
+  }, alice)
+  const e1 = rival('rival one'), e2 = rival('rival two')
+  const lowest = e1.id < e2.id ? e1 : e2
+  const t1 = new Relay(), t2 = new Relay()
+  t1.publish(e1); t1.publish(e2)
+  t2.publish(e2); t2.publish(e1)
+  const tq = (r) => r.query({ kinds: [KIND_DATA_SET], '#d': [tieId] })
+  check('same-second same-v tie: both arrival orders retain the lexicographically lowest id (NIP-01)',
+    tq(t1).length === 1 && tq(t1)[0].id === lowest.id && tq(t2)[0].id === lowest.id)
+  const h1 = new Relay(), h2 = new Relay()
+  h1.publish(e1); h2.publish(e2)
+  check('fanout across relays that each saw only ONE rival picks the same winner (comparator id tiebreak)',
+    (await new LocalRelay(h1, h2).query({ kinds: [KIND_DATA_SET], '#d': [tieId] }))[0].id === lowest.id)
+  // Lamport, second half: after syncing, a device whose LOCAL record still
+  // says v=1 rotates again — it joins the observed v=2 and picks 3; it can
+  // never collide backwards.
+  const rot3 = await rotateScope(shared, alice, {
+    scopeId: md.scopeId, generation: 1, scopeName: 'Multi',
+    payload: { name: 'Multi', fields: { display_name: 'DeviceAlice', note: 'post-sync rotation' } },
+    survivors: [getPublicKey(frank), getPublicKey(grace)],
+  })
+  check('a device with stale local state rotates to max(observed v)+1, not local+1', rot3.generation === 3)
+  // P6 interaction — both devices rotate AND move the scope, to DIFFERENT
+  // fresh d's. No relay-level collision exists (each new d holds one event;
+  // only the two old-d tombstones collide, both throwaway): the fork lives
+  // in the index, keyed by the shared lineage `prev`, and merge + reconcile
+  // converge it to ONE live identity.
+  const heidi = generateSecretKey()
+  const fdA = new Relay(), fdB = new Relay(), fsync = new Relay()
+  const fk = { scopeId: 'sk' + Math.random().toString(36).slice(2, 8), generation: 1, scopeKey: newScopeKey() }
+  await publishScope(new LocalRelay(fdA, fdB, fsync), alice, { ...fk, payload: { name: 'Fork', fields: { note: 'seed' } } })
+  await grant(new LocalRelay(fdA, fdB, fsync), alice, getPublicKey(heidi), { ...fk, scopeName: 'Fork' })
+  const dNewA = 'fa' + Math.random().toString(36).slice(2, 8)
+  const dNewB = 'fb' + Math.random().toString(36).slice(2, 8)
+  const mvA = await rotateScope(new LocalRelay(fdA), alice, {
+    scopeId: fk.scopeId, generation: 1, scopeName: 'Fork', seq: 2, newScopeId: dNewA,
+    payload: { name: 'Fork', fields: { note: 'branch A' } }, survivors: [getPublicKey(heidi)],
+  })
+  const mvB = await rotateScope(new LocalRelay(fdB), alice, {
+    scopeId: fk.scopeId, generation: 1, scopeName: 'Fork', seq: 2, newScopeId: dNewB,
+    payload: { name: 'Fork', fields: { note: 'branch B' } }, survivors: [getPublicKey(heidi)],
+  })
+  replay(fsync, fdA, fdB)
+  check('moved rotations record their lineage (prev = old d) for fork detection',
+    mvA.prev === fk.scopeId && mvB.prev === fk.scopeId && mvA.scopeId === dNewA && mvB.scopeId === dNewB)
+  const fIdx = mergeGrantIndex(
+    { issued: [toIssuedEntry({ scopeName: 'Fork', ...mvA, mtime: 500 }, [getPublicKey(heidi)])], received: [] },
+    { issued: [toIssuedEntry({ scopeName: 'Fork', ...mvB, mtime: 501 }, [getPublicKey(heidi)])], received: [] })
+  const liveEntries = fIdx.issued.filter(e => !e.deleted)
+  check('double-move fork: the merge keeps ONE live identity (same prev+v) and tombstones the dead branch',
+    liveEntries.length === 1 && liveEntries[0].scope === dNewB && liveEntries[0].conflicted === true
+    && liveEntries[0].strand?.includes(dNewA)
+    && fIdx.issued.find(e => e.scope === dNewA)?.deleted === true)
+  const fFixed = await reconcile(new LocalRelay(fsync), alice, fIdx)
+  const heidiBook = await addressBook(new LocalRelay(fsync), heidi)
+  check('after reconcile the survivor converges on ONE live address: winner ok, dead branch and old d both stranded stale',
+    heidiBook.find(e => e.scopeId === dNewB)?.status === 'ok'
+    && heidiBook.find(e => e.scopeId === dNewA)?.status === 'stale'
+    && heidiBook.find(e => e.scopeId === fk.scopeId)?.status === 'stale'
+    && fFixed.issued.find(e => e.scope === dNewB)?.conflicted === undefined)
 
   console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m`)
   relay.close()

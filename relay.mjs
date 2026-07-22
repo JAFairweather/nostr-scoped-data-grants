@@ -21,8 +21,20 @@ export class Relay {
 
   publish(event) {
     if (!verifyEvent(event)) throw new Error('invalid signature')
+    if (this.events.some(e => e.id === event.id)) return // relays store one copy per id
     const key = replaceKey(event)
-    if (key) this.events = this.events.filter(e => replaceKey(e) !== key)
+    if (key) {
+      // NIP-01 replacement, properly: the incumbent survives unless the
+      // arriving event is strictly newer — greater created_at, or equal
+      // created_at with the lexicographically LOWER id. Arrival order does
+      // not matter, which is what makes P3's same-v rotation collision
+      // deterministic: every relay, whatever order it saw the rivals in,
+      // retains the same survivor (SPEC "Concurrent publisher devices").
+      const cur = this.events.find(e => replaceKey(e) === key)
+      if (cur && (cur.created_at > event.created_at
+          || (cur.created_at === event.created_at && cur.id < event.id))) return
+      this.events = this.events.filter(e => replaceKey(e) !== key)
+    }
     this.events.push(event)
   }
 
