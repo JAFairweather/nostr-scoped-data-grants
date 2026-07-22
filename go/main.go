@@ -3,7 +3,7 @@
 // counterpart to the JS reference lib (../nipxx.mjs); the two share nothing
 // but the wire format.
 //
-//	go run . publish    -sk <hex> -scope <id> -gen <n> -key <b64> -payload <json>
+//	go run . publish    -sk <hex> -scope <id> -gen <n> -seq <n> -key <b64> -payload <json>
 //	go run . grant      -sk <hex> -to <pubhex> -scope <id> -gen <n> -key <b64> -name <name>
 //	go run . book       -sk <hex>                 # grantee address book → JSON
 //	go run . index-save -sk <hex>                 # fold received grants into kind-10440
@@ -39,6 +39,16 @@ var defaultRelays = "wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net"
 
 // ---------------------------------------------------------------- transport
 
+// seqOf reads the signed content sequence (the `u` tag, SPEC "Freshness and
+// rollback detection"); 0 when absent.
+func seqOf(ev *nostr.Event) int {
+	if t := ev.Tags.GetFirst([]string{"u"}); t != nil && len(*t) > 1 {
+		n, _ := strconv.Atoi((*t)[1])
+		return n
+	}
+	return 0
+}
+
 func query(pool *nostr.SimplePool, urls []string, f nostr.Filter) []*nostr.Event {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
@@ -50,7 +60,17 @@ func query(pool *nostr.SimplePool, urls []string, f nostr.Filter) []*nostr.Event
 			out = append(out, ie.Event)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	// Multi-relay fanout, freshest first: the signed `u` outranks created_at
+	// (self-asserted, possibly skewed), so a relay serving a rolled-back data
+	// set cannot shadow a newer sequence seen on another relay. Events with
+	// no `u` tag (every non-30440 kind) compare as 0 and keep pure
+	// created_at ordering — same comparator as the JS lib's byFreshness.
+	sort.Slice(out, func(i, j int) bool {
+		if ui, uj := seqOf(out[i]), seqOf(out[j]); ui != uj {
+			return ui > uj
+		}
+		return out[i].CreatedAt > out[j].CreatedAt
+	})
 	return out
 }
 
@@ -114,10 +134,13 @@ func cmdPublish(pool *nostr.SimplePool, urls []string, fs *flag.FlagSet, sk stri
 		fatal("payload must be JSON: %s", err)
 	}
 	payload["updated_at"] = time.Now().Unix()
+	// `u` — the content sequence — bumps on every publish of the scope
+	// (content update or rotation), independent of `v`; the CLI is stateless,
+	// so the caller carries and passes the next value.
 	ev := nostr.Event{
 		Kind:      kindDataSet,
 		CreatedAt: nostr.Now(),
-		Tags:      nostr.Tags{{"d", scope}, {"v", gen}},
+		Tags:      nostr.Tags{{"d", scope}, {"v", gen}, {"u", fs.Lookup("seq").Value.String()}},
 		Content:   symEncrypt(payload, key),
 	}
 	if err := ev.Sign(sk); err != nil {
@@ -177,8 +200,12 @@ type grantRec struct {
 
 type bookEntry struct {
 	grantRec
-	Status string          `json:"status"`
-	Data   json.RawMessage `json:"data,omitempty"`
+	Status string `json:"status"`
+	// Seq is the fetched event's content sequence (`u` tag) — the
+	// relay-visible freshness signal the caller persists as its per-scope
+	// high-water mark. 0 (omitted) when the event predates the `u` tag.
+	Seq  int             `json:"seq,omitempty"`
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
 func receiveGrants(pool *nostr.SimplePool, urls []string, sk string) []grantRec {
@@ -269,6 +296,7 @@ func fetchScope(pool *nostr.SimplePool, urls []string, g grantRec) bookEntry {
 	if v := ev.Tags.GetFirst([]string{"v"}); v != nil && len(*v) > 1 {
 		gen, _ = strconv.Atoi((*v)[1])
 	}
+	entry.Seq = seqOf(ev) // relay-visible content sequence, see bookEntry
 	entry.Status = "stale"
 	if gen > g.Generation {
 		return entry
@@ -290,8 +318,12 @@ func cmdBook(pool *nostr.SimplePool, urls []string, sk string) {
 // ---------------------------------------------------------------- grant index
 
 type receivedEntry struct {
-	A       string   `json:"a"`
-	V       int      `json:"v"`
+	A string `json:"a"`
+	V int    `json:"v"`
+	// U is the grantee's persisted per-scope high-water content sequence
+	// (SPEC "Freshness and rollback detection"). Optional: 0 (omitted)
+	// means unknown — accept the newest visible event, as pre-`u` clients do.
+	U       int      `json:"u,omitempty"`
 	Key     string   `json:"key"`
 	Petname string   `json:"petname,omitempty"`
 	Relays  []string `json:"relays"`
@@ -364,6 +396,7 @@ func main() {
 	relays := fs.String("relays", defaultRelays, "comma-separated relay urls")
 	fs.String("scope", "", "scope id (opaque)")
 	fs.String("gen", "1", "key generation")
+	fs.String("seq", "1", "content sequence (u tag; strictly increasing per scope)")
 	fs.String("key", "", "scope key (base64, 32 bytes)")
 	fs.String("payload", "{}", "payload JSON")
 	fs.String("to", "", "grantee pubkey (hex)")
