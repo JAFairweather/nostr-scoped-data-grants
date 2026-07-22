@@ -8,10 +8,11 @@
 // data only — everything published is ciphertext, but treat public relays
 // as public.
 
-import { generateSecretKey, getPublicKey } from 'nostr-tools'
+import { generateSecretKey, getPublicKey, nip59 } from 'nostr-tools'
 import { Relay } from './relay.mjs'
 import { LiveRelay, LocalRelay } from './liverelay.mjs'
 import {
+  KIND_DATA_SET, KIND_GRANT,
   newScopeKey, publishScope, grant, rotateScope, deleteScope, addressBook,
   receiveGrants, latestGrants, fetchScope,
   saveGrantIndex, loadGrantIndex, toReceivedEntry, fromReceivedEntry,
@@ -91,7 +92,43 @@ try {
   check('Carol detects stale after rotation',
     carolBook3[0]?.status === 'stale')
 
-  console.log('\n6. Grant Index (kind 10440)')
+  console.log('\n6. Bob re-wraps the rotated key to Carol (grant authentication)')
+  // Bob — a survivor holding a first-party gen-2 grant — re-delivers Alice's
+  // scope key to revoked Carol: a kind-440 rumor *Bob* authors whose a-tag
+  // still names Alice's scope. The authenticated author (the seal pubkey,
+  // Bob) differs from the a-tag publisher (Alice), so per SPEC "Grant
+  // authentication" readers flag it `rewrapped` and the default address book
+  // rejects it — the revocation is not silently undone unless a client opts
+  // into an explicit delegation policy.
+  const bobBasic = latestGrants(await receiveGrants(relay, bob)).find(g => g.scopeId === basic.scopeId)
+  const rewrap = nip59.wrapEvent({
+    kind: KIND_GRANT,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [
+      ['a', `${KIND_DATA_SET}:${getPublicKey(alice)}:${basic.scopeId}`, ''],
+      ['v', String(bobBasic.generation)],
+    ],
+    content: JSON.stringify({ scope_key: Buffer.from(bobBasic.scopeKey).toString('base64'), scope_name: 'Basic' }),
+  }, bob, getPublicKey(carol))
+  const r1 = await relay.publish(rewrap)
+  check('re-wrap gift wrap accepted', r1.acks > 0)
+  await settle()
+  const carolGrants = await receiveGrants(relay, carol)
+  const rewrapped = carolGrants.find(g => g.author === getPublicKey(bob))
+  check('Carol sees rewrapped:true (author Bob, a-tag publisher Alice)',
+    rewrapped?.rewrapped === true && rewrapped?.publisher === getPublicKey(alice)
+    && carolGrants.filter(g => g.author === getPublicKey(alice)).every(g => g.rewrapped === false))
+  const carolBook5 = await addressBook(relay, carol)
+  check('default address book rejects the re-wrap (Carol stays revoked)',
+    carolBook5.every(e => !e.rewrapped)
+    && carolBook5.find(e => e.scopeId === basic.scopeId)?.status === 'stale')
+  const carolBook5b = await addressBook(relay, carol, { allowRewrapped: true })
+  const viaRewrap = carolBook5b.find(e => e.rewrapped)
+  check('allowRewrapped surfaces it, distinct author intact — and it decrypts',
+    viaRewrap?.status === 'ok' && viaRewrap?.author === getPublicKey(bob)
+    && viaRewrap?.data?.fields?.display_name === 'SmokeAlice')
+
+  console.log('\n7. Grant Index (kind 10440)')
   const i1 = await saveGrantIndex(relay, bob, {
     issued: [],
     received: latestGrants(await receiveGrants(relay, bob)).map(g => toReceivedEntry(g, 'alice')),
@@ -106,7 +143,7 @@ try {
     recovered.length === 2 && recovered.every(e => e.status === 'ok')
     && recovered.some(e => e.data?.fields?.tel === '+506 555 0142'))
 
-  console.log('\n7. Delete a scope (tombstone + NIP-09)')
+  console.log('\n8. Delete a scope (tombstone + NIP-09)')
   const d1 = await deleteScope(relay, alice, { scopeId: personal.scopeId, generation: 1 })
   check('tombstone + kind-5 accepted', d1.acks > 0)
   await settle()

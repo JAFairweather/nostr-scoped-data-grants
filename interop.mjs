@@ -62,6 +62,12 @@ try {
   const fromGo = jsBook.find(e => e.publisher === getPublicKey(gopher))
   check('JS decrypts Go-published scope via Go-issued grant',
     fromGo?.status === 'ok' && fromGo?.data?.fields?.display_name === 'InteropGopher')
+  // SPEC "Grant authentication": both readers recover the same authenticated
+  // grant author (the NIP-59 seal pubkey) — Go reading the JS-issued grant
+  // attributes it to Alice, JS reading the Go-issued grant attributes it to
+  // Gopher, and each equals its a-tag publisher (first-party).
+  check('Go and JS agree on grant author identity (author == a-tag publisher)',
+    fromJs?.author === getPublicKey(alice) && fromGo?.author === getPublicKey(gopher))
 
   console.log('\n3. JS rotates its scope key → Go detects supersession')
   await publishScope(relay, alice, { ...scope, generation: 2, scopeKey: newScopeKey(),
