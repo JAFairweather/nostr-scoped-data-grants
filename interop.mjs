@@ -11,8 +11,8 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import { LiveRelay } from './liverelay.mjs'
 import {
   newScopeKey, publishScope, grant, addressBook,
-  receiveGrants, latestGrants, fetchScope,
-  saveGrantIndex, loadGrantIndex, toReceivedEntry, fromReceivedEntry,
+  receiveGrants, latestGrants,
+  saveGrantIndex, loadGrantIndex, toReceivedEntry,
 } from './nipxx.mjs'
 
 const RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net']
@@ -89,21 +89,44 @@ try {
   console.log('\n4. Go writes the Grant Index → JS recovers from it')
   go('index-save', '-sk', hex(bob), '-petname', 'friends')
   await settle()
-  const received = (await loadGrantIndex(relay, bob)).received.map(fromReceivedEntry)
-  const jsRecovered = await Promise.all(received.map(async g => ({ ...g, ...await fetchScope(relay, g) })))
-  check('JS recovers address book from Go-written kind-10440',
-    jsRecovered.some(e => e.publisher === getPublicKey(gopher) && e.status === 'ok'))
+  // Go's index-save records the inbox cursor next to the received cache
+  // (SPEC "Discovering new grants"); JS addressBook({ index }) warm-starts
+  // from the cache and drives its incremental wrap scan off the Go-written
+  // cursor — the P4 cursor crossing implementations in one direction.
+  const goIndex = await loadGrantIndex(relay, bob)
+  const jsRecovered = await addressBook(relay, bob, { index: goIndex })
+  check('JS recovers address book from Go-written kind-10440 (inbox cursor honored)',
+    goIndex.inbox?.since > 0
+    && jsRecovered.some(e => e.publisher === getPublicKey(gopher) && e.status === 'ok'))
 
   console.log('\n5. JS rewrites the Grant Index → Go recovers from it')
   await sleep(2000)  // replaceable events: ensure a strictly newer created_at
+  const all = await receiveGrants(relay, bob)
   await saveGrantIndex(relay, bob, {
     issued: [],
-    received: latestGrants(await receiveGrants(relay, bob)).map(g => toReceivedEntry(g, 'friends')),
+    received: latestGrants(all).map(g => toReceivedEntry(g, 'friends')),
+    inbox: all.cursor,  // cache + cursor in one write, per SPEC
   })
   await settle()
   const goRecovered = go('index-book', '-sk', hex(bob)) ?? []
   check('Go recovers address book from JS-written kind-10440',
     goRecovered.some(e => e.publisher === getPublicKey(gopher) && e.status === 'ok'))
+
+  console.log('\n6. JS grants a new scope after the index snapshot → Go catches up incrementally')
+  // The new wrap's created_at is NIP-59-fuzzed — up to two days behind the
+  // checkpoint Go reads from the JS-written cursor. Go's incremental scan
+  // reaches the overlap window behind the checkpoint and dedups the old
+  // wraps by id, so it must surface exactly this late grant on top of the
+  // warm cache: the P4 cursor crossing implementations in the other
+  // direction, against real randomized timestamps on live relays.
+  const late = { scopeId: 'il' + Math.random().toString(36).slice(2, 8), generation: 1, scopeKey: newScopeKey() }
+  await publishScope(relay, alice, { ...late, payload: { name: 'Late', fields: { display_name: 'InteropLate' } } })
+  await grant(relay, alice, getPublicKey(bob), { ...late, scopeName: 'Late' })
+  await settle()
+  const caught = go('index-book', '-sk', hex(bob)) ?? []
+  check('Go index-book honors the JS-written inbox cursor and discovers the new grant',
+    caught.find(e => e.scopeId === late.scopeId)?.status === 'ok'
+    && caught.some(e => e.publisher === getPublicKey(gopher) && e.status === 'ok'))
 
   console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m`)
   relay.close()

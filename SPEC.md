@@ -152,6 +152,15 @@ Key rotation cost is O(remaining grantees) per rotation. Publishers with large g
 
 **Deleting a scope.** Replacement of an addressable event destroys the prior ciphertext on conforming relays, so deletion is a special case of rotation: the publisher SHOULD publish a final `kind:30440` replacement (a *tombstone*) with an empty payload, an incremented `v`, and a freshly generated key that is granted to no one, and MAY additionally publish a [NIP-09](09.md) deletion request (`kind:5` with the `a` tag of the scope) asking relays to drop the tombstone as well. Grantees observe generation supersession and treat the scope exactly as a revocation; previously decrypted plaintext is unaffected (see Security 2). The publisher then removes the scope from their Grant Index.
 
+**Discovering new grants.** Grants arrive in the same `kind:1059` inbox as NIP-17 direct messages, and the inner kind is encrypted: a grantee cannot ask a relay for "grant wraps only". This indistinguishability is an intended property of NIP-59 — the grant graph is exactly what it protects — so the discovery cost cannot be filtered away server-side, only bounded. To bound it, grantees SHOULD treat the Grant Index (`kind:10440`) `received` list as the authoritative warm cache for the address book, and scan raw `kind:1059` wraps only incrementally — with a `since` filter anchored to a persisted checkpoint (the highest wrap `created_at` already processed) — to discover *new* grants. A full wrap re-scan is required only on cold recovery from the private key alone, when no Grant Index is found.
+
+An incremental scan is subject to two correctness rules, both consequences of NIP-59's timestamp randomization (wrap `created_at` is canonically backdated by up to two days):
+
+- The `since` filter MUST reach back at least the full randomization window (two days) behind the checkpoint. A wrap delivered *after* a scan may carry a `created_at` up to two days *older* than everything that scan saw; `since = checkpoint` silently loses such grants.
+- Consecutive scans therefore overlap, and clients MUST deduplicate wraps by event id across scans, processing each wrap at most once. Trial-unwrapping a wrap is idempotent, so a forgotten id costs only a repeated decrypt, never a wrong result — the id set is a cost bound, not a safety mechanism, and MAY be pruned to the trailing two-day window.
+
+The checkpoint and the id set together form the *inbox cursor*. A persisted cursor MUST NOT get ahead of the cache it summarizes: persist it in the same write as (or after) the `received` entries whose processing it records, since a cursor that outruns its cache hides grants behind an already-advanced checkpoint. The Grant Index is the natural home for both (see below) — one replaceable event updates cache and cursor atomically, and cold recovery stays "fetch one event".
+
 ## Grant Index (`kind:10440`)
 
 To make grants recoverable across clients with only the user's private key, both publishers and grantees SHOULD maintain a replaceable Grant Index event whose `content` is NIP-44 encrypted to their own key (conversation key derived from their own keypair, as in NIP-51 private items):
@@ -165,13 +174,16 @@ To make grants recoverable across clients with only the user's private key, both
   "received": [
     {"a": "30440:<pubkey>:<scope-id>", "v": 2, "u": 9, "key": "<base64>",
      "petname": "alice", "relays": ["wss://..."]}
-  ]
+  ],
+  "inbox": {"since": 1751904000, "ids": ["<wrap-event-id>", "..."]}
 }
 ```
 
 For the publisher, `issued` is the authoritative record needed to perform rotations. For the grantee, `received` is effectively the private address book: a list of dereferenceable, self-updating contact cards. This event contains all key material and MUST never be published unencrypted.
 
 `u` is optional in both lists. In `issued` it records the last content sequence the publisher emitted for the scope, so the next publish — from any device or session — can use a strictly greater value. In `received` it is the grantee's persisted high-water mark (see "Freshness and rollback detection"). An absent `u` means unknown: accept the newest visible event, as pre-`u` clients do.
+
+`inbox` is optional: the grantee's inbox cursor (see "Discovering new grants"). `since` is the highest `kind:1059` `created_at` already processed; `ids` are the wrap ids already processed within the trailing two-day randomization window (grants *and* other wraps — a DM trial-unwrapped once need never be trial-unwrapped again; older ids MAY be pruned). Writers that do not maintain a cursor omit the member, and a writer unaware of it may drop it when rewriting the index; either way readers finding no cursor fall back to a full wrap scan, so the degradation is safe — slower, never lossy.
 
 ## Interaction with existing NIPs
 

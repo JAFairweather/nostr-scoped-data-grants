@@ -44,7 +44,15 @@ const asSigner = (s) => s instanceof Uint8Array ? localSigner(s) : s
 
 // NIP-59, from signer primitives (nostr-tools' nip59 needs the raw key).
 // Timestamps are fuzzed up to two days into the past, per the NIP.
-const fuzz = () => now() - Math.floor(Math.random() * 2 * 24 * 60 * 60)
+
+/** NIP-59 timestamp-randomization window (seconds): how far into the past
+ *  giftWrap backdates `created_at` — and therefore how far *behind* its
+ *  checkpoint an incremental inbox scan must reach (see receiveGrants),
+ *  since a wrap delivered after a scan may be timestamped up to this much
+ *  older than everything that scan saw. One constant, both duties. */
+export const WRAP_OVERLAP = 2 * 24 * 60 * 60
+
+const fuzz = () => now() - Math.floor(Math.random() * WRAP_OVERLAP)
 
 async function giftWrap(signer, recipientPub, rumor) {
   rumor.id = getEventHash(rumor)
@@ -193,13 +201,46 @@ export async function deleteScope(relay, publisherSecret, { scopeId, generation,
 
 // ---------------------------------------------------------------- grantee
 
-/** Collect and unwrap all grants addressed to this keyholder. */
-export async function receiveGrants(relay, granteeSecret) {
+/**
+ * Collect and unwrap grants addressed to this keyholder.
+ *
+ * Full scan by default — and grants share the kind-1059 inbox with NIP-17
+ * DMs, whose inner kind is encrypted, so a relay cannot be asked for
+ * "grants only". That indistinguishability is an intended NIP-59 property
+ * (the grant graph is what this protocol protects); the cost it imposes
+ * cannot be filtered away server-side, only bounded. Bounding is what the
+ * inbox cursor does (SPEC "Discovering new grants"): pass { since, seenIds }
+ * — `since` the highest wrap created_at already processed, `seenIds` the
+ * wrap ids already processed — and the scan turns incremental. Two rules
+ * keep it correct against fuzz() above:
+ *
+ *  - the 1059 query reaches WRAP_OVERLAP *behind* the checkpoint, because
+ *    a wrap delivered after the last scan may be timestamped up to two
+ *    days older than everything that scan saw — a naive since = checkpoint
+ *    silently loses such grants;
+ *  - consecutive scans therefore overlap, so wraps are deduplicated by id:
+ *    anything in `seenIds` (grant or DM) is never trial-unwrapped again.
+ *
+ * The advanced cursor rides on the returned array as `result.cursor` =
+ * { since, ids }, with `ids` pruned to the trailing WRAP_OVERLAP window so
+ * it stays bounded. Persist it *together with* the grants it accounts for
+ * — the Grant Index `inbox` member is the natural home — never ahead of
+ * them: a cursor that outruns its cache hides grants. A wrap a relay
+ * transiently omitted merely gets re-trial-unwrapped when it reappears;
+ * unwrapping is idempotent, so dedup is a cost optimization, never a
+ * correctness dependency.
+ */
+export async function receiveGrants(relay, granteeSecret, { since, seenIds } = {}) {
   const signer = asSigner(granteeSecret)
   const granteePub = await signer.getPublicKey()
-  const wraps = await relay.query({ kinds: [1059], '#p': [granteePub] })
+  const filter = { kinds: [1059], '#p': [granteePub] }
+  if (since != null) filter.since = Math.max(since - WRAP_OVERLAP, 0)
+  const wraps = await relay.query(filter)
+  const known = new Set(seenIds ?? [])
+  const checkpoint = wraps.reduce((m, w) => Math.max(m, w.created_at), since ?? 0)
   const grants = []
   for (const wrap of wraps) {
+    if (known.has(wrap.id)) continue // overlap dedup: processed on a prior scan
     let rumor
     try { rumor = await giftUnwrap(signer, wrap) } catch { continue }
     if (rumor.kind !== KIND_GRANT) continue
@@ -221,6 +262,13 @@ export async function receiveGrants(relay, granteeSecret) {
       scopeKey: unb64(scope_key),
       issuedAt: rumor.created_at,
     })
+  }
+  // Next scan's dedup set: every wrap seen inside the window that the next
+  // overlapping query can return again — including non-grants, so a DM
+  // trial-unwrapped once is never trial-unwrapped twice.
+  grants.cursor = {
+    since: checkpoint,
+    ids: wraps.filter(w => w.created_at >= checkpoint - WRAP_OVERLAP).map(w => w.id),
   }
   return grants
 }
@@ -283,12 +331,29 @@ export async function fetchScope(relay, grantRecord, { highWater } = {}) {
 
 /**
  * A grantee's whole address book: unwrap grants, keep the newest per scope,
- * dereference each. Three lines — this IS the client. Options pass through to
+ * dereference each. This IS the client. Options pass through to
  * latestGrants: re-wrapped grants are dropped unless { allowRewrapped: true }.
+ *
+ * With { index } (a loaded Grant Index) the book warm-starts per SPEC
+ * "Discovering new grants": the `received` entries are the cache — the book
+ * is rebuilt without unwrapping a single wrap — and the wrap scan turns
+ * incremental from the index's `inbox` cursor ({ since, seenIds } override
+ * it when passed explicitly). Cache entries are listed first, so a fresh
+ * discovery supersedes a cached scope only by higher generation, and —
+ * carrying no author — they pass latestGrants' re-wrap gate: accepting them
+ * was the user's earlier, deliberate decision. Absent any index/cursor the
+ * behavior is the historical full scan. The advanced cursor rides on the
+ * result as `book.cursor`; persist it back alongside the entries it covers
+ * (one Grant Index write updates cache + cursor atomically).
  */
-export async function addressBook(relay, granteeSecret, opts = {}) {
-  const grants = latestGrants(await receiveGrants(relay, granteeSecret), opts)
-  return Promise.all(grants.map(async g => ({ ...g, ...await fetchScope(relay, g) })))
+export async function addressBook(relay, granteeSecret, { index, since, seenIds, ...opts } = {}) {
+  const cached = index ? index.received.map(fromReceivedEntry) : []
+  const fresh = await receiveGrants(relay, granteeSecret,
+    { since: since ?? index?.inbox?.since, seenIds: seenIds ?? index?.inbox?.ids })
+  const grants = latestGrants([...cached, ...fresh], opts)
+  const book = await Promise.all(grants.map(async g => ({ ...g, ...await fetchScope(relay, g) })))
+  book.cursor = fresh.cursor
+  return book
 }
 
 // ---------------------------------------------------------- grant index
@@ -300,7 +365,11 @@ export async function addressBook(relay, granteeSecret, opts = {}) {
 /**
  * Load the user's Grant Index. `issued` is the publisher's authoritative
  * record (everything a rotation needs); `received` is the grantee's private
- * address book — both recoverable from the nsec alone.
+ * address book — both recoverable from the nsec alone. The optional `inbox`
+ * member is the grantee's persisted inbox cursor (see receiveGrants):
+ * store `book.cursor` there in the same write that stores the entries it
+ * covers, and addressBook({ index }) warm-starts from both. An index
+ * without it (older writers) simply falls back to a full wrap scan.
  */
 export async function loadGrantIndex(relay, secret) {
   const signer = asSigner(secret)
