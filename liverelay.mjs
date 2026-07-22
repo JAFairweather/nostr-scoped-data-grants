@@ -15,9 +15,15 @@ if (typeof WebSocket === 'undefined') {
 // be skewed or fuzzed — so a relay serving a rolled-back data set cannot
 // shadow a newer sequence seen on another relay. Events without a `u` tag
 // (every non-30440 kind, pre-`u` data sets) compare as 0, leaving their
-// ordering — newest created_at first — unchanged.
+// ordering — newest created_at first — unchanged. The final tiebreak is
+// NIP-01's replacement tiebreak (the lexicographically lowest id survives a
+// created_at tie), so a client merging relays that have not yet converged
+// on a P3 same-v rotation collision picks exactly the event the relays
+// will retain — identical from every perspective, with no coordination
+// (SPEC "Concurrent publisher devices").
 const uOf = (e) => Number(e.tags.find(t => t[0] === 'u')?.[1] ?? 0)
 const byFreshness = (a, b) => (uOf(b) - uOf(a)) || (b.created_at - a.created_at)
+  || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
 export class LiveRelay {
   constructor(urls) {

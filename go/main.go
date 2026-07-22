@@ -66,11 +66,18 @@ func query(pool *nostr.SimplePool, urls []string, f nostr.Filter) []*nostr.Event
 	// set cannot shadow a newer sequence seen on another relay. Events with
 	// no `u` tag (every non-30440 kind) compare as 0 and keep pure
 	// created_at ordering — same comparator as the JS lib's byFreshness.
+	// The final tiebreak is NIP-01's replacement tiebreak (lowest id
+	// survives a created_at tie): a reader merging relays that have not yet
+	// converged on a same-v rotation collision picks exactly the event the
+	// relays will retain (SPEC "Concurrent publisher devices").
 	sort.Slice(out, func(i, j int) bool {
 		if ui, uj := seqOf(out[i]), seqOf(out[j]); ui != uj {
 			return ui > uj
 		}
-		return out[i].CreatedAt > out[j].CreatedAt
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt > out[j].CreatedAt
+		}
+		return out[i].ID < out[j].ID
 	})
 	return out
 }
@@ -196,7 +203,14 @@ type grantRec struct {
 	// the original wrap (and thus its seal) is no longer in hand.
 	Author     string `json:"author,omitempty"`
 	Generation int    `json:"generation"`
-	key        [32]byte
+	// IssuedAt is the grant rumor's created_at — honest publisher time (the
+	// rumor is never fuzzed; only seal and wrap timestamps are). Among
+	// grants of equal (publisher, scope, generation) the latest issued wins
+	// (see latestGrants): a P3 reconciling re-grant carries the same v as
+	// the losing grant it repairs and supersedes it by this field. Zero on
+	// records rebuilt from the Grant Index.
+	IssuedAt nostr.Timestamp `json:"issuedAt,omitempty"`
+	key      [32]byte
 }
 
 type bookEntry struct {
@@ -296,6 +310,7 @@ func receiveGrants(pool *nostr.SimplePool, urls []string, sk string, cur *inboxC
 		out = append(out, grantRec{
 			Publisher: parts[1], ScopeID: parts[2], ScopeName: c.ScopeName,
 			Author:     rumor.PubKey, // seal pubkey — GiftUnwrap authenticates it
+			IssuedAt:   rumor.CreatedAt,
 			Generation: gen, key: keyFromB64(c.ScopeKey),
 		})
 	}
@@ -306,7 +321,11 @@ func receiveGrants(pool *nostr.SimplePool, urls []string, sk string, cur *inboxC
 // Re-wrapped grants (authenticated author ≠ a-tag publisher) are dropped, per
 // SPEC "Grant authentication": this reader implements the default-reject
 // policy. Records rebuilt from the Grant Index carry no author and pass —
-// accepting them was the user's earlier, deliberate decision.
+// accepting them was the user's earlier, deliberate decision. Among grants
+// of EQUAL generation — legitimate after a P3 collision repair, whose
+// reconciling re-grant reuses the colliding v — the latest issued wins
+// (SPEC "Concurrent publisher devices"); index cache records (IssuedAt 0)
+// thus yield to any later first-party re-grant at the same generation.
 func latestGrants(grants []grantRec) []grantRec {
 	best := map[string]grantRec{}
 	for _, g := range grants {
@@ -314,7 +333,8 @@ func latestGrants(grants []grantRec) []grantRec {
 			continue // re-wrapped: not the publisher's own grant
 		}
 		k := g.Publisher + ":" + g.ScopeID
-		if cur, ok := best[k]; !ok || g.Generation > cur.Generation {
+		if cur, ok := best[k]; !ok || g.Generation > cur.Generation ||
+			(g.Generation == cur.Generation && g.IssuedAt > cur.IssuedAt) {
 			best[k] = g
 		}
 	}
@@ -372,8 +392,16 @@ type receivedEntry struct {
 	// U is the grantee's persisted per-scope high-water content sequence
 	// (SPEC "Freshness and rollback detection"). Optional: 0 (omitted)
 	// means unknown — accept the newest visible event, as pre-`u` clients do.
-	U       int      `json:"u,omitempty"`
-	Key     string   `json:"key"`
+	U   int    `json:"u,omitempty"`
+	Key string `json:"key,omitempty"`
+	// Mtime and Deleted are P3 merge metadata (SPEC "Index merge rule"):
+	// the entry's last-modification stamp and the tombstone marker that
+	// keeps a merge from resurrecting a removed grant. This reader's whole
+	// duty toward them is to read mtime-bearing indexes without breaking
+	// and to skip tombstones (which carry no key); merging is a writer's
+	// concern, and this CLI's index-save is a cold full rebuild.
+	Mtime   int64    `json:"mtime,omitempty"`
+	Deleted bool     `json:"deleted,omitempty"`
 	Petname string   `json:"petname,omitempty"`
 	Relays  []string `json:"relays"`
 }
@@ -434,6 +462,9 @@ func cmdIndexBook(pool *nostr.SimplePool, urls []string, sk string) {
 	}
 	var recs []grantRec
 	for _, r := range index.Received {
+		if r.Deleted {
+			continue // tombstone (P3 merge rule): retained by writers, never dereferenced
+		}
 		parts := strings.Split(r.A, ":")
 		if len(parts) != 3 {
 			continue

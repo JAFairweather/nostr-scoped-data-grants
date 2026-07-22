@@ -179,7 +179,18 @@ export async function grant(relay, publisherSecret, granteePubkey,
 export async function rotateScope(relay, publisherSecret,
                                   { scopeId, generation, payload, scopeName, survivors, seq, newScopeId }) {
   const scopeKey = newScopeKey()
-  const next = generation + 1
+  const signer = asSigner(publisherSecret)
+  // Lamport generation (SPEC "Concurrent publisher devices"): the next `v`
+  // is max(all v observed for this scope) + 1 — the caller's own record
+  // joined with whatever the relay set currently serves — never simply
+  // local + 1. On one device the two coincide; across devices this cannot
+  // prevent a concurrent collision (the relay may not carry the rival yet)
+  // but guarantees generations never move backwards once devices sync.
+  const [cur] = await relay.query({
+    kinds: [KIND_DATA_SET], authors: [await signer.getPublicKey()], '#d': [scopeId],
+  })
+  const seenV = Number(cur?.tags.find(t => t[0] === 'v')?.[1] ?? 0)
+  const next = Math.max(generation, seenV) + 1
   const liveId = newScopeId ?? scopeId
   // A rotation is also a publish, so `u` bumps too (tracker default, or the
   // caller's explicit seq); the new mark is returned alongside the new key.
@@ -191,7 +202,12 @@ export async function rotateScope(relay, publisherSecret,
       { scopeId, generation: next, scopeKey: newScopeKey(), payload: {}, seq })
   for (const pubkey of survivors)
     await grant(relay, publisherSecret, pubkey, { scopeId: liveId, generation: next, scopeKey, scopeName })
-  return { scopeKey, generation: next, seq: pub.seq, scopeId: liveId }
+  // `prev` records the moved scope's lineage (old d) for the Grant Index
+  // `issued` entry: two devices that both rotate AND both move never
+  // collide at one address, so the fork is detected in the index by its
+  // shared prev — see mergeGrantIndex.
+  return { scopeKey, generation: next, seq: pub.seq, scopeId: liveId,
+           ...(newScopeId ? { prev: scopeId } : {}) }
 }
 
 /**
@@ -323,7 +339,18 @@ export function latestGrants(grants, { allowRewrapped = false } = {}) {
   for (const g of grants) {
     if (g.rewrapped && !allowRewrapped) continue
     const k = `${g.publisher}:${g.scopeId}`
-    if (!best.has(k) || g.generation > best.get(k).generation) best.set(k, g)
+    const cur = best.get(k)
+    // Higher generation supersedes. EQUAL generations are legitimate after a
+    // P3 collision repair — the reconciling re-grant carries the same `v` as
+    // the losing grant it supersedes — so among equals the latest issued
+    // wins (the rumor's created_at is honest publisher time; only seal and
+    // wrap timestamps are fuzzed). Grant Index cache entries carry no
+    // issuedAt (0) and so yield to any later first-party re-grant at the
+    // same generation, which is exactly the reconcile case; re-wraps never
+    // reach this comparison (dropped above).
+    if (!cur || g.generation > cur.generation
+        || (g.generation === cur.generation && (g.issuedAt ?? 0) > (cur.issuedAt ?? 0)))
+      best.set(k, g)
   }
   return [...best.values()]
 }
@@ -397,7 +424,9 @@ export async function jitterFetch(fn, maxMs) {
  * (one Grant Index write updates cache + cursor atomically).
  */
 export async function addressBook(relay, granteeSecret, { index, since, seenIds, ...opts } = {}) {
-  const cached = index ? index.received.map(fromReceivedEntry) : []
+  // Tombstoned entries (deleted: true, P3 merge rule) stay in the index so
+  // a merge cannot resurrect them, but are never dereferenced.
+  const cached = index ? index.received.filter(e => !e.deleted).map(fromReceivedEntry) : []
   const fresh = await receiveGrants(relay, granteeSecret,
     { since: since ?? index?.inbox?.since, seenIds: seenIds ?? index?.inbox?.ids })
   const grants = latestGrants([...cached, ...fresh], opts)
@@ -430,17 +459,156 @@ export async function loadGrantIndex(relay, secret) {
     : { issued: [], received: [] }
 }
 
-/** Encrypt and (re)publish the Grant Index. Replaceable — newest wins. */
+/**
+ * Encrypt and (re)publish the Grant Index. The EVENT is replaceable —
+ * newest wins — but the CONTENT is merged, never blindly overwritten
+ * (SPEC "Index merge rule"): load the currently published index, merge the
+ * local state into it, publish the merge. Two devices editing concurrently
+ * therefore both keep their edits; pre-P3 the loser's entries vanished.
+ */
 export async function saveGrantIndex(relay, secret, index) {
   const signer = asSigner(secret)
+  const merged = mergeGrantIndex(await loadGrantIndex(relay, signer), index)
   const event = await signer.signEvent({
     kind: KIND_GRANT_INDEX,
     created_at: now(),
     tags: [],
-    content: await signer.nip44Encrypt(await signer.getPublicKey(), JSON.stringify(index)),
+    content: await signer.nip44Encrypt(await signer.getPublicKey(), JSON.stringify(merged)),
   })
   const receipt = await relay.publish(event)
   return { event, ...receipt }
+}
+
+/**
+ * Merge two Grant Index versions (SPEC "Index merge rule"). `issued`
+ * entries are keyed by `scope`, `received` by `a`; per key the survivor is
+ * the entry with the greater `mtime` (absent compares as 0, so undated
+ * pre-P3 entries always lose to dated ones), ties broken by the greater
+ * `v`, then the lexicographically greater `key`; an entry and its tombstone
+ * tied on all three resolve to the tombstone. Deletions are tombstones
+ * ({ deleted: true, mtime }) precisely so this union cannot resurrect them.
+ *
+ * Two issued rivals that agree on `v` have their grantee lists unioned:
+ * with the same key that is plain bookkeeping (both lists already hold the
+ * current key); with DIFFERENT keys it is a same-v rotation collision — the
+ * survivor is marked `conflicted: true` so reconcile() re-grants the
+ * authoritative key to every survivor either device granted. Two live
+ * moved entries sharing (prev, v) are a double-move fork (both devices
+ * rotated AND moved, to different d's — no relay-level collision exists):
+ * the same per-entry rule picks the one live identity; the dead branch
+ * becomes a tombstone and its address is queued on the winner (`strand`)
+ * for reconcile() to strand on-relay. The inbox cursor merges by
+ * max(since) + id union. Output is key-sorted: merging is commutative,
+ * byte-for-byte, so every device computes the identical index.
+ */
+export function mergeGrantIndex(a, b) {
+  const wins = (x, y) =>
+    (x.mtime ?? 0) !== (y.mtime ?? 0) ? (x.mtime ?? 0) > (y.mtime ?? 0)
+    : (x.v ?? 0) !== (y.v ?? 0) ? (x.v ?? 0) > (y.v ?? 0)
+    : (x.key ?? '') !== (y.key ?? '') ? (x.key ?? '') > (y.key ?? '')
+    : !!x.deleted && !y.deleted
+  const union = (xs, ys) => [...new Set([...(xs ?? []), ...(ys ?? [])])]
+  const mergeList = (xs, ys, keyOf, annotate) => {
+    const best = new Map()
+    for (const e of [...(xs ?? []), ...(ys ?? [])]) {
+      const k = keyOf(e), cur = best.get(k)
+      if (!cur) { best.set(k, { ...e }); continue }
+      const [w, l] = wins(e, cur) ? [{ ...e }, cur] : [cur, e]
+      best.set(k, annotate ? annotate(w, l) : w)
+    }
+    return [...best.values()].sort((x, y) => keyOf(x) < keyOf(y) ? -1 : 1)
+  }
+  // Same-scope rivals: at equal v, union grantees; different keys = collision.
+  const collide = (w, l) => {
+    if (!w.deleted && !l.deleted && w.v === l.v) {
+      w.grantees = union(w.grantees, l.grantees)
+      if (w.key !== l.key) w.conflicted = true
+    }
+    return w
+  }
+  let issued = mergeList(a.issued, b.issued, e => e.scope, collide)
+  // Double-move forks: group live moved entries by (prev, v).
+  const forks = new Map()
+  for (const e of issued)
+    if (!e.deleted && e.prev != null)
+      forks.set(`${e.prev}:${e.v}`, [...(forks.get(`${e.prev}:${e.v}`) ?? []), e])
+  for (const rivals of forks.values()) {
+    if (rivals.length < 2) continue
+    const winner = rivals.reduce((w, e) => wins(e, w) ? e : w)
+    winner.conflicted = true
+    for (const loser of rivals) {
+      if (loser === winner) continue
+      winner.grantees = union(winner.grantees, loser.grantees)
+      winner.strand = union(winner.strand, [loser.scope])
+      // The dead branch's tombstone keeps its (v, key, mtime) so it also
+      // beats the still-live copy a lagging device may merge in later.
+      issued = issued.map(e => e === loser
+        ? { scope: e.scope, v: e.v, key: e.key, mtime: e.mtime, deleted: true } : e)
+    }
+  }
+  const received = mergeList(a.received, b.received, e => e.a)
+  const cursors = [a.inbox, b.inbox].filter(Boolean)
+  const inbox = cursors.length ? {
+    since: Math.max(...cursors.map(c => c.since ?? 0)),
+    ids: [...new Set(cursors.flatMap(c => c.ids ?? []))].sort(),
+  } : undefined
+  return { issued, received, ...(inbox ? { inbox } : {}) }
+}
+
+/**
+ * Mandatory survivor reconciliation (SPEC "Concurrent publisher devices"):
+ * run after an index sync. For every live issued entry, fetch the
+ * authoritative surviving 30440 and compare:
+ *
+ *  - entry (v, key) matches the survivor and the merge flagged a collision
+ *    (`conflicted`) → this device holds the authoritative key: re-grant it
+ *    to every grantee (the union the merge built), clear the flag, restamp
+ *    mtime. The re-grant carries the same v with a later issuedAt, which is
+ *    what latestGrants prefers — survivors stranded on the losing key
+ *    converge with no action of their own.
+ *  - same v but the entry's key fails the MAC → this device LOST the
+ *    collision. It cannot mint the winner's key, so it marks the entry
+ *    conflicted: the flag rides the index to the winning device, whose own
+ *    merge + reconcile completes the repair.
+ *  - event v ahead of the entry → ordinary supersession by another device's
+ *    later rotation; its entry arrives with the next merge. Behind → the
+ *    relay set has not caught up with our own publish. Neither is repaired
+ *    from here.
+ *
+ * A `strand` queue (dead double-move branches) is flushed first: each dead
+ * address gets an on-relay tombstone (empty payload, throwaway key, bumped
+ * generation) so its holders read supersession, exactly like a d-move's old
+ * address. Returns the updated index — persist it with saveGrantIndex.
+ */
+export async function reconcile(relay, publisherSecret, index) {
+  const signer = asSigner(publisherSecret)
+  const pub = await signer.getPublicKey()
+  const issued = []
+  for (const entry of index.issued ?? []) {
+    if (entry.deleted) { issued.push(entry); continue }
+    const e = { ...entry }
+    for (const dead of e.strand ?? [])
+      await publishScope(relay, signer,
+        { scopeId: dead, generation: e.v + 1, scopeKey: newScopeKey(), payload: {} })
+    delete e.strand
+    const [event] = await relay.query({ kinds: [KIND_DATA_SET], authors: [pub], '#d': [e.scope] })
+    if (event) {
+      const eventV = Number(event.tags.find(t => t[0] === 'v')?.[1] ?? 0)
+      let holdsKey = false
+      try { symDecrypt(event.content, unb64(e.key)); holdsKey = true } catch {}
+      if (eventV === e.v && holdsKey && e.conflicted) {
+        for (const grantee of e.grantees ?? [])
+          await grant(relay, signer, grantee,
+            { scopeId: e.scope, generation: e.v, scopeKey: unb64(e.key), scopeName: e.scope_name })
+        delete e.conflicted
+        e.mtime = mtimeNow()
+      } else if (eventV === e.v && !holdsKey) {
+        e.conflicted = true
+      }
+    }
+    issued.push(e)
+  }
+  return { ...index, issued }
 }
 
 // Index entries use the spec's wire field names; these adapters convert to
@@ -450,20 +618,35 @@ export async function saveGrantIndex(relay, secret, index) {
 // nextSeq); in `received` it is the grantee's persisted high-water. When the
 // record has no seq (e.g. built from a grant, which carries no `u`), JSON
 // serialization drops the field — absent means unknown, accept newest.
+//
+// `mtime` (SPEC "Index merge rule") is the entry's last local MODIFICATION
+// time, the merge's primary comparator. A record fresh from a grant is a
+// modification and stamps now; a record round-tripped through the index
+// keeps its stored mtime, so merely re-saving never artificially freshens
+// an entry past a rival device's genuinely newer edit. Callers making a
+// deliberate edit (petname, grantee change) pass mtime explicitly or drop
+// the field to restamp. `prev` is a moved scope's lineage — see rotateScope.
+
+/** Wall-clock unix seconds for index-entry mtimes (event timestamps use the
+ *  monotonic now() below; mtimes are merge metadata, not event fields). */
+const mtimeNow = () => Math.floor(Date.now() / 1000)
+
 export const toReceivedEntry = (g, petname, relays = []) => ({
   a: `${KIND_DATA_SET}:${g.publisher}:${g.scopeId}`, v: g.generation, u: g.seq,
-  key: b64(g.scopeKey), petname, relays,
+  key: b64(g.scopeKey), petname, relays, mtime: g.mtime ?? mtimeNow(),
 })
 export const fromReceivedEntry = (e) => {
   const [, publisher, scopeId] = e.a.split(':')
-  return { publisher, scopeId, generation: e.v, seq: e.u, scopeKey: unb64(e.key), petname: e.petname }
+  return { publisher, scopeId, generation: e.v, seq: e.u, scopeKey: unb64(e.key),
+           petname: e.petname, mtime: e.mtime }
 }
-export const toIssuedEntry = ({ scopeId, scopeName, generation, scopeKey, seq }, grantees) => ({
+export const toIssuedEntry = ({ scopeId, scopeName, generation, scopeKey, seq, mtime, prev }, grantees) => ({
   scope: scopeId, scope_name: scopeName, v: generation, u: seq, key: b64(scopeKey), grantees,
+  mtime: mtime ?? mtimeNow(), prev,
 })
 export const fromIssuedEntry = (e) => ({
   scopeId: e.scope, scopeName: e.scope_name, generation: e.v, seq: e.u,
-  scopeKey: unb64(e.key), grantees: e.grantees,
+  scopeKey: unb64(e.key), grantees: e.grantees, mtime: e.mtime, prev: e.prev,
 })
 
 // Monotonic: two publishes of the same replaceable/addressable event within

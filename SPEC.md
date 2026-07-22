@@ -89,7 +89,7 @@ The two counters have distinct jobs: `v` is the **rotation generation**, bumped 
 
 Replacement makes grants live, but a grantee talking to a single withholding relay could otherwise be pinned to an older, validly-signed event with no signal that a newer one exists. The `u` tag makes such rollback *detectable*:
 
-- Grantees SHOULD fetch a scope from at least two relays (the publisher's NIP-65 write relays, plus any grant relay hints) and accept the event with the highest `(u, created_at)`, compared lexicographically. The signed `u` outranks `created_at`, which is self-asserted and may be skewed or fuzzed.
+- Grantees SHOULD fetch a scope from at least two relays (the publisher's NIP-65 write relays, plus any grant relay hints) and accept the event with the highest `(u, created_at)`, compared lexicographically, remaining ties broken by the lexicographically **lowest** `id` — NIP-01's replacement tiebreak, so that readers merging relays which have not yet converged on a concurrent-device collision pick exactly the event the relays will retain (see "Concurrent publisher devices"). The signed `u` outranks `created_at`, which is self-asserted and may be skewed or fuzzed.
 - Grantees SHOULD persist a per-scope high-water mark `(v, u)`, advanced from each accepted event, and MUST NOT downgrade to an event whose `(v, u)` is lexicographically lower than the stored mark. A lower value is a rollback signal: the client SHOULD warn and/or retry other relays rather than display the served copy as current. An event carrying no `u` tag compares as `u = 0` (so a pre-`u` copy served after a sequenced one is flagged too).
 - The mark is keyed by scope identity `(publisher-pubkey, d)`: if the scope's `d` changes (a rotation MAY move a scope to a fresh `d`; see the metadata-hardening profile under Security and privacy), the high-water mark resets with the new scope identity. The new identity's content sequence restarts and it begins with no mark, so its low `u` is not a rollback signal. A mark MUST NOT be carried across a `d` change: the old identity's final events (its tombstone included) share the new identity's bumped `v`, so a carried mark would misread the restarted `u` as a downgrade and false-flag rollback.
 
@@ -141,7 +141,7 @@ A prospective contact MAY request access by sending an ordinary NIP-17 direct me
 
 **Revoking a grantee.** The publisher:
 
-1. Generates a new scope key; increments `v`.
+1. Generates a new scope key; picks the new `v` by the Lamport rule of "Concurrent publisher devices" (on a single device this is simply `v + 1`).
 2. Republishes the `kind:30440` event encrypted under the new key (bumping `u`, as on every publish).
 3. Issues fresh `kind:440` grants (new `v`) to all *remaining* grantees.
 4. MAY send a `kind:441` revocation notice to the revoked party (gift-wrapped), containing the `a` tag of the affected scope, so their client can gracefully mark the contact data as no longer maintained. Publishers who prefer silent revocation simply skip this.
@@ -152,7 +152,21 @@ A revoked grantee retains any plaintext previously decrypted but can no longer r
 
 Key rotation cost is O(remaining grantees) per rotation. Publishers with large grantee sets SHOULD structure scopes so that broad, low-sensitivity data (rarely revoked) is separated from narrow, high-sensitivity data (small grantee count, cheap to rotate).
 
-**Deleting a scope.** Replacement of an addressable event destroys the prior ciphertext on conforming relays, so deletion is a special case of rotation: the publisher SHOULD publish a final `kind:30440` replacement (a *tombstone*) with an empty payload, an incremented `v`, and a freshly generated key that is granted to no one, and MAY additionally publish a [NIP-09](09.md) deletion request (`kind:5` with the `a` tag of the scope) asking relays to drop the tombstone as well. Grantees observe generation supersession and treat the scope exactly as a revocation; previously decrypted plaintext is unaffected (see Security 2). The publisher then removes the scope from their Grant Index.
+**Deleting a scope.** Replacement of an addressable event destroys the prior ciphertext on conforming relays, so deletion is a special case of rotation: the publisher SHOULD publish a final `kind:30440` replacement (a *tombstone*) with an empty payload, an incremented `v`, and a freshly generated key that is granted to no one, and MAY additionally publish a [NIP-09](09.md) deletion request (`kind:5` with the `a` tag of the scope) asking relays to drop the tombstone as well. Grantees observe generation supersession and treat the scope exactly as a revocation; previously decrypted plaintext is unaffected (see Security 2). The publisher then removes the scope from their Grant Index — as a tombstone entry, per the index merge rule, so a lagging device's merge cannot resurrect it.
+
+### Concurrent publisher devices
+
+A publisher's devices share one keypair and coordinate only through relays, so uncoordinated rotations and index writes race: two devices rotating the same scope concurrently would each naively pick the same `v + 1` with *different* keys, survivors re-granted by the losing device would silently read `stale` forever, and concurrent Grant Index writes would clobber each other (see the index merge rule). Everyone has a phone and a laptop; the following three rules make the races convergent and repairable. They provide convergence for **honest devices sharing a key** — this is *not* byzantine tolerance. A malicious holder of the publisher key is not a "device" to reconcile with: it can sign anything the key can sign, rotations and index rewrites included, and no client-side rule constrains it. Key compromise remains out of scope here as everywhere in this NIP (Security 5).
+
+**Lamport generation.** When rotating, the publisher MUST set the new `v` to `max(all v ever observed for this scope — its own record joined with what the relays it can reach currently serve) + 1`, not simply its local `v + 1`. On a single device the two coincide. This is a Lamport counter: it cannot prevent a concurrent collision (the relay may not carry the rival yet), but it guarantees `v` never moves backwards once devices see each other's events. (`u` needs no new rule: "strictly greater than any prior `u` for the same `(pubkey, d)`" already imposes the same max-observed discipline on every publish; a collision loser's `u` dies with its event.)
+
+**Deterministic winner.** If two rotations collide at the same `v`, NIP-01 addressable replacement leaves exactly one surviving `kind:30440` per `(pubkey, d)`: the event with the highest `created_at`, ties broken by the lexicographically lowest `id`. Its scope key is **authoritative** for that generation. Clients that see both rivals — multi-relay fanout before the relays converge — MUST resolve them by the same rule (the freshness order's final tiebreak), so every relay and every reader, in any arrival order, retains the same winner with no coordination. A grantee whose grant decrypts the survivor is current; a grantee whose same-`v` grant fails authentication (MAC error) holds the losing key and reads the scope as `stale` — detectably, not silently — and MUST be re-granted.
+
+Because collision repair re-issues grants at the *same* `v`, grants are not unique per (publisher, scope, `v`): among such equals, clients MUST prefer the most recently issued (the grant rumor's `created_at` — honest publisher time; NIP-59 fuzzing touches only seal and wrap). A reconciling re-grant thereby supersedes the losing grant it repairs, and a cached index entry (which carries no issue time) yields to it.
+
+**Mandatory reconciliation.** On its next index sync, a publisher device MUST detect survivors whose last-issued `(v, key)` does not match the authoritative surviving event, and re-issue grants for the authoritative key — the *reconciling re-grant*. The index merge is what surfaces the collision: merging two `issued` entries with the same scope and the same `v` but different keys marks the surviving entry conflicted and unions the rivals' grantee lists (index merge rule), so the device holding the authoritative key re-grants every survivor *either* device granted. A device that discovers it holds the losing key (its entry fails the MAC against the survivor at the same `v`) cannot mint the winner's key; it marks its entry conflicted so the fact reaches the winning device with the next merge.
+
+If both colliding rotations also moved the scope to fresh `d`s (metadata-hardening item 1) — different fresh `d`s — the rivals never meet at one address: each new `d` carries exactly one event, and only the old address converges (both moves tombstone it; replacement keeps one, harmlessly, as both are throwaway-keyed). The fork is visible only in the index, which is why moved `issued` entries SHOULD record their lineage as `prev` (the old `d`): a merge finding two live entries that share `(prev, v)` resolves them with the same per-entry rule, keeping one live identity; the losing branch's entry becomes a tombstone, its grantees fold into the winner for re-granting, and its address MUST be stranded behind an on-relay tombstone (empty payload, throwaway key, bumped `v`) at the next reconciliation, so its holders read ordinary supersession exactly as at a d-move's old address.
 
 **Discovering new grants.** Grants arrive in the same `kind:1059` inbox as NIP-17 direct messages, and the inner kind is encrypted: a grantee cannot ask a relay for "grant wraps only". This indistinguishability is an intended property of NIP-59 — the grant graph is exactly what it protects — so the discovery cost cannot be filtered away server-side, only bounded. To bound it, grantees SHOULD treat the Grant Index (`kind:10440`) `received` list as the authoritative warm cache for the address book, and scan raw `kind:1059` wraps only incrementally — with a `since` filter anchored to a persisted checkpoint (the highest wrap `created_at` already processed) — to discover *new* grants. A full wrap re-scan is required only on cold recovery from the private key alone, when no Grant Index is found.
 
@@ -171,11 +185,11 @@ To make grants recoverable across clients with only the user's private key, both
 {
   "issued": [
     {"scope": "<scope-id>", "scope_name": "Personal", "v": 3, "u": 12,
-     "key": "<base64>", "grantees": ["<pubkey>", "..."]}
+     "key": "<base64>", "grantees": ["<pubkey>", "..."], "mtime": 1751904000}
   ],
   "received": [
     {"a": "30440:<pubkey>:<scope-id>", "v": 2, "u": 9, "key": "<base64>",
-     "petname": "alice", "relays": ["wss://..."]}
+     "petname": "alice", "relays": ["wss://..."], "mtime": 1751904000}
   ],
   "inbox": {"since": 1751904000, "ids": ["<wrap-event-id>", "..."]}
 }
@@ -186,6 +200,16 @@ For the publisher, `issued` is the authoritative record needed to perform rotati
 `u` is optional in both lists. In `issued` it records the last content sequence the publisher emitted for the scope, so the next publish — from any device or session — can use a strictly greater value. In `received` it is the grantee's persisted high-water mark (see "Freshness and rollback detection"). An absent `u` means unknown: accept the newest visible event, as pre-`u` clients do.
 
 `inbox` is optional: the grantee's inbox cursor (see "Discovering new grants"). `since` is the highest `kind:1059` `created_at` already processed; `ids` are the wrap ids already processed within the trailing two-day randomization window (grants *and* other wraps — a DM trial-unwrapped once need never be trial-unwrapped again; older ids MAY be pruned). Writers that do not maintain a cursor omit the member, and a writer unaware of it may drop it when rewriting the index; either way readers finding no cursor fall back to a full wrap scan, so the degradation is safe — slower, never lossy.
+
+### Index merge rule
+
+The Grant Index event is replaceable, but its *content* is a **mergeable** structure, not a last-writer-wins blob: with more than one device, a blind overwrite silently drops the other device's grants (and its inbox cursor). Before publishing, a client MUST load the currently published index, merge its local state into it, and publish the merge — never a blind overwrite.
+
+`issued` entries are keyed by `scope`; `received` entries by `a`. Each entry SHOULD carry an `mtime` — unix seconds of the entry's last local *modification* (not of the index write: re-saving an unmodified entry keeps its `mtime`, so a lagging device cannot artificially freshen stale state). To merge two versions: take the union of keys and, per key, keep the entry with the greater `mtime` (an absent `mtime` compares as `0`, so undated pre-merge entries always lose to dated ones — the safe default on first upgrade), ties broken by the greater `v`, then the lexicographically greater `key`; an entry and its tombstone tied on all of these resolve to the tombstone. Merging is commutative and idempotent: every device that has seen the same versions computes the same index, and with a single device the merge equals the old overwrite.
+
+Two `issued` rivals that agree on `v` additionally have their `grantees` lists unioned — with the same key that is plain bookkeeping (both lists already hold the current key); with different keys it is a same-`v` rotation collision, and the surviving entry is marked conflicted for the reconciling re-grant (see "Concurrent publisher devices", including the `prev`-keyed double-move fork). The `inbox` cursor merges by `max(since)` plus the union of `ids` (prunable to the randomization window as usual); this is sound because the merged cursor travels in the same event as the merged caches it summarizes.
+
+Deletions are represented as **tombstone entries** (`{ ..., "deleted": true, "mtime": <ts> }`) rather than by removing the entry, so that merging with a device still carrying the live entry cannot resurrect it. Tombstoned entries are retained by writers and never dereferenced by readers. A deliberate later re-grant (a live entry with a greater `mtime`) supersedes a tombstone; a stale copy of the removed entry never does. Tombstones MAY be pruned once every device has synced past them — which a client cannot generally observe, so retaining them is the safe default.
 
 ## Interaction with existing NIPs
 
