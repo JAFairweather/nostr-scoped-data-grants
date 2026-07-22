@@ -14,7 +14,7 @@ import { LiveRelay, LocalRelay } from './liverelay.mjs'
 import {
   KIND_DATA_SET, KIND_GRANT, WRAP_OVERLAP,
   newScopeKey, publishScope, grant, rotateScope, deleteScope, addressBook,
-  receiveGrants, latestGrants, fetchScope,
+  receiveGrants, latestGrants, fetchScope, padTo, jitterFetch,
   saveGrantIndex, loadGrantIndex, toReceivedEntry, fromReceivedEntry,
 } from './nipxx.mjs'
 
@@ -277,6 +277,113 @@ try {
   const again = await receiveGrants(relay, bob, { since: inc.cursor.since, seenIds: inc.cursor.ids })
   check('overlapping re-scan double-processes nothing (dedup by wrap id)',
     again.length === 0 && again.cursor.since === inc.cursor.since)
+
+  console.log('\n12. Metadata hardening (d rotates with the key; padding; jitter)')
+  // Weakness 7: every payload is ciphertext, yet a relay watching a STABLE
+  // opaque d accumulates the scope's whole update history ("this scope
+  // changed 47 times"). Rotation already re-grants every survivor, so
+  // moving the scope to a fresh d at the same time is free — the new
+  // address rides in the same gift wrap as the new key — and the old
+  // address is stranded behind a tombstone that tells a revoked watcher
+  // nothing. The in-memory observer below records what an adversarial
+  // operator sees, in both modes; the grantee flow runs against `relay`.
+  const observer = new Relay()
+  const observed = {   // every publish lands on the main relay AND the observer
+    publish: async (e) => { observer.publish(e); return relay.publish(e) },
+    query: (f) => relay.query(f),
+  }
+  const dave = generateSecretKey(), erin = generateSecretKey()
+  const dOld = 'sm' + Math.random().toString(36).slice(2, 8)
+  const dNew = 'sn' + Math.random().toString(36).slice(2, 8)
+  const meta = { scopeId: dOld, generation: 1, scopeKey: newScopeKey() }
+  await publishScope(observed, alice, { ...meta, payload: { name: 'Meta', fields: { display_name: 'HardAlice', note: 'generation one' } } })  // u=1
+  await grant(relay, alice, getPublicKey(dave), { ...meta, scopeName: 'Meta' })
+  await grant(relay, alice, getPublicKey(erin), { ...meta, scopeName: 'Meta' })
+  await publishScope(observed, alice, { ...meta, payload: { name: 'Meta', fields: { display_name: 'HardAlice', note: 'generation one, edited' } } })  // u=2: history accrues under dOld
+  await settle()
+  const daveFull = await receiveGrants(relay, dave)
+  await saveGrantIndex(relay, dave, {   // pre-move warm cache: OLD address + cursor
+    issued: [],
+    received: latestGrants(daveFull).map(g => toReceivedEntry(g, 'alice')),
+    inbox: daveFull.cursor,
+  })
+  const before = observer.observerView().filter(e => e.kind === KIND_DATA_SET).map(e => e.d)
+  // Revoke Erin AND move the scope: the same rotation call, one extra option.
+  const moved = await rotateScope(observed, alice, {
+    scopeId: dOld, generation: 1,
+    payload: { name: 'Meta', fields: { display_name: 'HardAlice', note: 'generation two' } },
+    scopeName: 'Meta', survivors: [getPublicKey(dave)], newScopeId: dNew,
+  })
+  await settle()
+  check('d-rotation returns the moved identity: new scopeId, bumped v, RESTARTED u',
+    moved.scopeId === dNew && moved.generation === 2 && moved.seq === 1)
+  const daveBook = await addressBook(relay, dave)
+  const followed = daveBook.find(e => e.scopeId === dNew)
+  check('survivor follows to the new address seamlessly via the re-grant (same wrap as the key)',
+    followed?.status === 'ok' && followed?.generation === 2 && followed?.scopeName === 'Meta'
+    && followed?.data?.fields?.note === 'generation two')
+  const erinBook = await addressBook(relay, erin)
+  check('revoked watcher of the tombstoned address learns nothing: stale, no data, no pointer to the new d',
+    erinBook.length === 1 && erinBook[0].scopeId === dOld
+    && erinBook[0].status === 'stale' && erinBook[0].data == null)
+  // High-water marks are keyed by (pubkey, d): the moved scope is a NEW
+  // identity, starting with no mark, so its restarted u=1 reads ok…
+  const freshFetch = await fetchScope(relay, followed)
+  check('fresh identity reads ok at u=1 — no mark carries over, no false rollback',
+    freshFetch.status === 'ok' && freshFetch.generation === 2 && freshFetch.seq === 1)
+  // …and here is why SPEC forbids carrying a mark across the d change: the
+  // old identity's tombstone shares the bumped v=2 with a HIGHER u (3), so
+  // a carried mark would misread the restarted sequence as a downgrade.
+  const carried = await fetchScope(relay, followed, { highWater: { v: 2, u: 3 } })
+  check('a (wrongly) carried old-identity mark would false-flag rollback — hence per-(pubkey,d) marks',
+    carried.status === 'rollback')
+  // The old identity stays monotone to the end: the tombstone bumped (v, u),
+  // so against the old mark it reads supersession (stale), never rollback.
+  const strand = await fetchScope(relay,
+    { publisher: getPublicKey(alice), scopeId: dOld, generation: 1, scopeKey: meta.scopeKey },
+    { highWater: { v: 1, u: 2 } })
+  check('tombstone under the old d reads stale against the old mark (monotone, no rollback)',
+    strand.status === 'stale' && strand.seq === 3)
+  // P4 warm cache across the move: the cached entry names the OLD address;
+  // the re-grant arrives through the ordinary incremental wrap scan and
+  // supersedes it — same publisher, same scope_name lineage, next
+  // generation, new a/d — with still no full re-scan.
+  const daveIdx = await loadGrantIndex(relay, dave)
+  const spyMove = spy(relay)
+  const warmMoved = await addressBook(spyMove, dave, { index: daveIdx })
+  check('warm cache: re-grant supersedes the cached old address — new d ok, old d stale, no full re-scan',
+    warmMoved.find(e => e.scopeId === dNew)?.status === 'ok'
+    && warmMoved.find(e => e.scopeId === dOld)?.status === 'stale'
+    && spyMove.filters.find(f => f.kinds?.includes(1059))?.since === daveIdx.inbox.since - WRAP_OVERLAP)
+  const after = observer.observerView().filter(e => e.kind === KIND_DATA_SET)
+  check("observer's longitudinal view broke: the live scope's d changed across generations",
+    before.includes(dOld) && !before.includes(dNew)
+    && after.some(e => e.d === dNew) && after.some(e => e.d === dOld))
+  // Padding to coarse buckets. NIP-44's own padding is fine-grained, so a
+  // field edit can hop size classes; padTo pins differently sized payloads
+  // into ONE publisher-chosen bucket. Construction is pure client side —
+  // in-memory relay in both modes, asserting on the signed events.
+  const padRelay = new LocalRelay(new Relay())
+  const padKey = newScopeKey()
+  const small = { name: 'Pad', fields: { note: 'short' } }
+  const big = { name: 'Pad', fields: { note: 'x'.repeat(400) } }
+  const rawS = await publishScope(padRelay, alice, { scopeId: 'pa1', generation: 1, scopeKey: newScopeKey(), payload: small })
+  const rawB = await publishScope(padRelay, alice, { scopeId: 'pa2', generation: 1, scopeKey: newScopeKey(), payload: big })
+  check('unpadded, the two payloads sit in different observable size classes (the leak)',
+    rawS.event.content.length !== rawB.event.content.length)
+  const padS = await publishScope(padRelay, alice, { scopeId: 'pa3', generation: 1, scopeKey: padKey, payload: padTo(small, 1024) })
+  const padB = await publishScope(padRelay, alice, { scopeId: 'pa4', generation: 1, scopeKey: newScopeKey(), payload: padTo(big, 1024) })
+  check('padTo(1024) puts both in one size class: equal ciphertext length',
+    padS.event.content.length === padB.event.content.length)
+  const padRec = { publisher: getPublicKey(alice), scopeId: 'pa3', generation: 1, scopeKey: padKey }
+  const padded = await fetchScope(padRelay, padRec)
+  check('padding is transparent to readers: fields intact, pad ignored',
+    padded.status === 'ok' && padded.data.fields.note === 'short')
+  // Fetch jitter: defer, then pass the result through untouched.
+  const t0 = Date.now()
+  const viaJitter = await jitterFetch(() => fetchScope(padRelay, padRec), 250)
+  check('jitterFetch defers the fetch and passes the result through',
+    viaJitter.status === 'ok' && viaJitter.data.fields.note === 'short' && Date.now() - t0 < 10_000)
 
   console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m`)
   relay.close()
