@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process'
 import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import { LiveRelay } from './liverelay.mjs'
 import {
-  newScopeKey, publishScope, grant, addressBook,
+  newScopeKey, publishScope, grant, rotateScope, addressBook,
   receiveGrants, latestGrants,
   saveGrantIndex, loadGrantIndex, toReceivedEntry,
 } from './nipxx.mjs'
@@ -127,6 +127,29 @@ try {
   check('Go index-book honors the JS-written inbox cursor and discovers the new grant',
     caught.find(e => e.scopeId === late.scopeId)?.status === 'ok'
     && caught.some(e => e.publisher === getPublicKey(gopher) && e.status === 'ok'))
+
+  console.log('\n7. JS moves a scope to a fresh d at rotation → unmodified Go follows')
+  // Metadata hardening (SPEC "Metadata-hardening profile", item 1): the d
+  // rotates WITH the key, the new address riding in the same gift wrap as
+  // the re-granted key. Deliberately NO Go-side change exists for this step
+  // — that is the compatibility claim: a reader that merely implements
+  // grants + fetch follows the move with zero new code, reads the restarted
+  // content sequence (u=1) under the new identity, and sees the stranded
+  // old address as ordinary generation supersession (stale).
+  const dNew = 'im' + Math.random().toString(36).slice(2, 8)
+  await rotateScope(relay, alice, {
+    scopeId: late.scopeId, generation: 1,
+    payload: { name: 'Late', fields: { display_name: 'InteropLate' } },
+    scopeName: 'Late', survivors: [getPublicKey(bob)], newScopeId: dNew,
+  })
+  await settle()
+  const movedBook = go('book', '-sk', hex(bob)) ?? []
+  const movedTo = movedBook.find(e => e.scopeId === dNew)
+  check('Go follows the JS d-rotation via the re-grant: new d ok at v=2, restarted u=1',
+    movedTo?.status === 'ok' && movedTo?.generation === 2 && movedTo?.seq === 1
+    && movedTo?.data?.fields?.display_name === 'InteropLate')
+  check('Go reads the stranded old address as ordinary supersession (stale)',
+    movedBook.find(e => e.scopeId === late.scopeId)?.status === 'stale')
 
   console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m`)
   relay.close()
