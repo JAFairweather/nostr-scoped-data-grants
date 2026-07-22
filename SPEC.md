@@ -108,6 +108,15 @@ The rumor:
 
 Because the rumor is unsigned, a leaked grant is deniable; the grantee nevertheless authenticates it via the seal, per NIP-59.
 
+### Grant authentication
+
+The authenticated author of a grant is the `pubkey` of its NIP-59 **seal** (`kind:13`), recovered during unwrapping. Clients MUST compare this author to the publisher pubkey encoded in the grant's `a` tag (`30440:<publisher-pubkey>:<scope-id>`).
+
+- If they are **equal**, the grant is a first-party grant.
+- If they **differ**, the grant is a *re-wrapped* grant: some grantee has re-delivered a scope key it holds. A re-wrapped grant is cryptographically indistinguishable from key exfiltration. Clients MUST NOT present a re-wrapped grant as a first-party grant. Clients SHOULD reject re-wrapped grants by default; a client MAY accept one only under an explicit, deployment-defined delegation policy, and MUST surface the distinct author.
+
+This is the grant-side counterpart of the data-set signer check (see Security 6). It is enforced by honest clients, not by cryptography: a grantee who holds a scope key can always share it out of band, where no client mediates. What the check guarantees is narrower and real — a conforming client never mistakes re-delivered key material for the publisher's own grant. Sanctioned onward delegation is instead performed with **derived scopes** — a sub-issuer publishing, and granting, its *own* `kind:30440` — for which author and `a`-tag publisher agree by construction (see [FUTURE.md](FUTURE.md), "Delegation chains").
+
 ### Grant requests
 
 A prospective contact MAY request access by sending an ordinary NIP-17 direct message, or clients MAY implement a dedicated request flow out of band (QR code, link). This NIP deliberately does not standardize a request event: the grant decision is a human decision, and existing DM rails are sufficient to carry it.

@@ -162,9 +162,15 @@ func cmdGrant(pool *nostr.SimplePool, urls []string, fs *flag.FlagSet, sk string
 // ---------------------------------------------------------------- grantee
 
 type grantRec struct {
-	Publisher  string `json:"publisher"`
-	ScopeID    string `json:"scopeId"`
-	ScopeName  string `json:"scopeName,omitempty"`
+	Publisher string `json:"publisher"`
+	ScopeID   string `json:"scopeId"`
+	ScopeName string `json:"scopeName,omitempty"`
+	// Authenticated grant author — the NIP-59 seal pubkey, as recovered by
+	// GiftUnwrap. Differs from Publisher (the a-tag's data-set owner) when a
+	// grantee re-wrapped a scope key it holds; see SPEC "Grant
+	// authentication". Empty on records rebuilt from the Grant Index, where
+	// the original wrap (and thus its seal) is no longer in hand.
+	Author     string `json:"author,omitempty"`
 	Generation int    `json:"generation"`
 	key        [32]byte
 }
@@ -214,6 +220,7 @@ func receiveGrants(pool *nostr.SimplePool, urls []string, sk string) []grantRec 
 		}
 		out = append(out, grantRec{
 			Publisher: parts[1], ScopeID: parts[2], ScopeName: c.ScopeName,
+			Author:     rumor.PubKey, // seal pubkey — GiftUnwrap authenticates it
 			Generation: gen, key: keyFromB64(c.ScopeKey),
 		})
 	}
@@ -221,9 +228,16 @@ func receiveGrants(pool *nostr.SimplePool, urls []string, sk string) []grantRec 
 }
 
 // Keep only the newest grant per (publisher, scope) — key rotations supersede.
+// Re-wrapped grants (authenticated author ≠ a-tag publisher) are dropped, per
+// SPEC "Grant authentication": this reader implements the default-reject
+// policy. Records rebuilt from the Grant Index carry no author and pass —
+// accepting them was the user's earlier, deliberate decision.
 func latestGrants(grants []grantRec) []grantRec {
 	best := map[string]grantRec{}
 	for _, g := range grants {
+		if g.Author != "" && g.Author != g.Publisher {
+			continue // re-wrapped: not the publisher's own grant
+		}
 		k := g.Publisher + ":" + g.ScopeID
 		if cur, ok := best[k]; !ok || g.Generation > cur.Generation {
 			best[k] = g

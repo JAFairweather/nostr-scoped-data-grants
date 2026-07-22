@@ -186,11 +186,13 @@ export async function receiveGrants(relay, granteeSecret) {
       publisher, scopeId, scopeName: scope_name, relayHint,
       // Who actually issued this grant (the authenticated rumor author) —
       // distinct from `publisher` (the a-tag's data-set owner). They differ
-      // when a grantee re-gifts a scope key it holds. Consumers SHOULD treat
-      // `author !== publisher` as a re-wrapped grant and decide deliberately
-      // (see FUTURE.md → delegation chains); this reference reader stays
-      // permissive and only exposes the distinction.
+      // when a grantee re-gifts a scope key it holds: a *re-wrapped* grant,
+      // which SPEC "Grant authentication" says MUST NOT pass as first-party
+      // and SHOULD be rejected by default. receiveGrants stays permissive —
+      // every grant is returned, flagged — and the default-reject policy
+      // lives in latestGrants/addressBook ({ allowRewrapped: true } opts in).
       author: rumor.pubkey,
+      rewrapped: rumor.pubkey !== publisher,
       generation: Number(rumor.tags.find(t => t[0] === 'v')?.[1] ?? 0),
       scopeKey: unb64(scope_key),
       issuedAt: rumor.created_at,
@@ -199,10 +201,18 @@ export async function receiveGrants(relay, granteeSecret) {
   return grants
 }
 
-/** Keep only the newest grant per (publisher, scope) — key rotations supersede. */
-export function latestGrants(grants) {
+/**
+ * Keep only the newest grant per (publisher, scope) — key rotations supersede.
+ * Re-wrapped grants (author ≠ a-tag publisher, per SPEC "Grant authentication")
+ * are rejected by default; { allowRewrapped: true } is the explicit-policy
+ * escape hatch, and even then the record keeps `author`/`rewrapped` so callers
+ * surface the distinct author. Honest-client enforcement only: a malicious
+ * grantee can always hand the raw key to anyone out of band.
+ */
+export function latestGrants(grants, { allowRewrapped = false } = {}) {
   const best = new Map()
   for (const g of grants) {
+    if (g.rewrapped && !allowRewrapped) continue
     const k = `${g.publisher}:${g.scopeId}`
     if (!best.has(k) || g.generation > best.get(k).generation) best.set(k, g)
   }
@@ -232,10 +242,11 @@ export async function fetchScope(relay, grantRecord) {
 
 /**
  * A grantee's whole address book: unwrap grants, keep the newest per scope,
- * dereference each. Three lines — this IS the client.
+ * dereference each. Three lines — this IS the client. Options pass through to
+ * latestGrants: re-wrapped grants are dropped unless { allowRewrapped: true }.
  */
-export async function addressBook(relay, granteeSecret) {
-  const grants = latestGrants(await receiveGrants(relay, granteeSecret))
+export async function addressBook(relay, granteeSecret, opts = {}) {
+  const grants = latestGrants(await receiveGrants(relay, granteeSecret), opts)
   return Promise.all(grants.map(async g => ({ ...g, ...await fetchScope(relay, g) })))
 }
 
