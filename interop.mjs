@@ -12,7 +12,8 @@ import { LiveRelay } from './liverelay.mjs'
 import {
   newScopeKey, publishScope, grant, rotateScope, addressBook,
   receiveGrants, latestGrants,
-  saveGrantIndex, loadGrantIndex, toReceivedEntry,
+  saveGrantIndex, loadGrantIndex, mergeGrantIndex, reconcile,
+  toReceivedEntry, toIssuedEntry,
 } from './nipxx.mjs'
 
 const RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net']
@@ -150,6 +151,63 @@ try {
     && movedTo?.data?.fields?.display_name === 'InteropLate')
   check('Go reads the stranded old address as ordinary supersession (stale)',
     movedBook.find(e => e.scopeId === late.scopeId)?.status === 'stale')
+
+  console.log('\n8. JS stages a same-v device collision → Go converges on the winner and recovers via the reconciling re-grant')
+  // Two "devices" of one publisher rotate a scope concurrently to the SAME
+  // v=2 with different keys (staged as two direct publishes; the second
+  // carries the later created_at, so every conforming relay retains it per
+  // NIP-01 — the P3 deterministic winner). Bob was granted only the LOSING
+  // key. The Go reader must converge on the surviving event and report bob
+  // stale (same-v MAC fail: detection, not silence); then JS runs the
+  // repair — mergeGrantIndex flags the collision from the two devices'
+  // entries, reconcile() re-grants the authoritative key — and Go must
+  // accept the same-v re-grant (latest issuedAt wins) and read ok. P3's
+  // convergence crossing implementations in both directions: JS writes the
+  // race and the repair, Go independently resolves both.
+  const cs = 'ic' + Math.random().toString(36).slice(2, 8)
+  const loseKey = newScopeKey(), winKey = newScopeKey()
+  await publishScope(relay, alice, { scopeId: cs, generation: 1, scopeKey: newScopeKey(),
+    payload: { name: 'Collide', fields: { display_name: 'SeedAlice' } }, seq: 1 })
+  // device A (phone): the losing rotation — bob is ITS survivor
+  await publishScope(relay, alice, { scopeId: cs, generation: 2, scopeKey: loseKey,
+    payload: { name: 'Collide', fields: { display_name: 'PhoneAlice' } }, seq: 2 })
+  await grant(relay, alice, getPublicKey(bob), { scopeId: cs, generation: 2, scopeKey: loseKey, scopeName: 'Collide' })
+  // device B (laptop): the winning rotation — later created_at, same v
+  await publishScope(relay, alice, { scopeId: cs, generation: 2, scopeKey: winKey,
+    payload: { name: 'Collide', fields: { display_name: 'LaptopAlice' } }, seq: 2 })
+  await settle()
+  let goCollide = (go('book', '-sk', hex(bob)) ?? []).find(e => e.scopeId === cs)
+  check('Go converges on the NIP-01 winner and reports the losing-key holder stale (same v, MAC fail)',
+    goCollide?.status === 'stale' && goCollide?.generation === 2 && goCollide?.seq === 2)
+  const collidedIdx = mergeGrantIndex(
+    { issued: [toIssuedEntry({ scopeId: cs, scopeName: 'Collide', generation: 2, scopeKey: loseKey, seq: 2, mtime: 1000 }, [getPublicKey(bob)])], received: [] },
+    { issued: [toIssuedEntry({ scopeId: cs, scopeName: 'Collide', generation: 2, scopeKey: winKey, seq: 2, mtime: 1001 }, [])], received: [] })
+  await reconcile(relay, alice, collidedIdx)
+  await settle()
+  goCollide = (go('book', '-sk', hex(bob)) ?? []).find(e => e.scopeId === cs)
+  check('after reconcile, Go recovers via the same-v re-grant (latest issuedAt wins): ok on the authoritative key',
+    goCollide?.status === 'ok' && goCollide?.data?.fields?.display_name === 'LaptopAlice')
+
+  console.log('\n9. JS writes a merged, mtime-bearing index (with a tombstone) → Go reads it without breaking')
+  // The index is now mergeable: entries carry mtime, removals are
+  // tombstones ({deleted:true}), and saveGrantIndex load-merges instead of
+  // overwriting. The Go reader's whole P3 duty is to read such an index —
+  // honoring tombstones, ignoring merge metadata it does not write.
+  const all2 = await receiveGrants(relay, bob)
+  await saveGrantIndex(relay, bob, {
+    issued: [],
+    received: [
+      ...latestGrants(all2).map(g => toReceivedEntry(g, 'friends')),
+      { a: `30440:${getPublicKey(alice)}:phantom`, deleted: true, mtime: Math.floor(Date.now() / 1000) },
+    ],
+    inbox: all2.cursor,
+  })
+  await settle()
+  const goMerged = go('index-book', '-sk', hex(bob)) ?? []
+  check('Go index-book reads mtime-bearing entries, skips the tombstone, and carries the reconciled key',
+    goMerged.some(e => e.publisher === getPublicKey(gopher) && e.status === 'ok')
+    && !goMerged.some(e => e.scopeId === 'phantom')
+    && goMerged.find(e => e.scopeId === cs)?.status === 'ok')
 
   console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m`)
   relay.close()

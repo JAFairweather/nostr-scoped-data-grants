@@ -15,7 +15,8 @@ import {
   KIND_DATA_SET, KIND_GRANT, WRAP_OVERLAP,
   newScopeKey, publishScope, grant, rotateScope, deleteScope, addressBook,
   receiveGrants, latestGrants, fetchScope, padTo, jitterFetch,
-  saveGrantIndex, loadGrantIndex, toReceivedEntry, fromReceivedEntry,
+  saveGrantIndex, loadGrantIndex, mergeGrantIndex, reconcile,
+  toReceivedEntry, fromReceivedEntry, toIssuedEntry,
 } from './nipxx.mjs'
 
 const DEFAULT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net']
@@ -384,6 +385,190 @@ try {
   const viaJitter = await jitterFetch(() => fetchScope(padRelay, padRec), 250)
   check('jitterFetch defers the fetch and passes the result through',
     viaJitter.status === 'ok' && viaJitter.data.fields.note === 'short' && Date.now() - t0 < 10_000)
+
+  console.log('\n13. Multi-device publisher consistency (Lamport v, deterministic winner, reconcile, mergeable index)')
+  // Weakness 5: `v` is uncoordinated and the Grant Index was last-write-
+  // wins. Two devices rotating one scope concurrently both pick v+1 with
+  // different keys — survivors re-granted by the losing device silently
+  // read stale — and concurrent index writes clobber each other. The races
+  // are staged with one in-memory relay per device (true concurrency:
+  // neither device sees the other's events before publishing), then
+  // cross-synced in BOTH arrival orders; deterministic in both modes. What
+  // P3 buys is convergence for HONEST devices sharing a key — not
+  // byzantine tolerance: a malicious co-holder of the publisher key can
+  // sign anything the key can sign, and no client rule constrains it.
+  const devA = new Relay(), devB = new Relay()      // each device's own view
+  const syncAB = new Relay(), syncBA = new Relay()  // converged views, opposite arrival orders
+  const replay = (dst, ...srcs) => srcs.forEach(src => src.events.forEach(e => dst.publish(e)))
+  const b64k = (k) => Buffer.from(k).toString('base64')
+  const decrypts = (ct, key) => { try { nip44.v2.decrypt(ct, key); return true } catch { return false } }
+  const frank = generateSecretKey(), grace = generateSecretKey()
+  const md = { scopeId: 'sv' + Math.random().toString(36).slice(2, 8), generation: 1, scopeKey: newScopeKey() }
+  await publishScope(new LocalRelay(devA, devB, syncAB, syncBA), alice,
+    { ...md, payload: { name: 'Multi', fields: { display_name: 'DeviceAlice', note: 'seed' } } })
+  // Concurrent rotation: the phone revokes with survivor Frank; the laptop,
+  // holding a divergent roster, rotates with survivor Grace. Each Lamport-
+  // picks max(observed 1) + 1 — the same v=2, two different keys.
+  const rotA = await rotateScope(new LocalRelay(devA), alice, {
+    scopeId: md.scopeId, generation: 1, scopeName: 'Multi', seq: 2,
+    payload: { name: 'Multi', fields: { display_name: 'DeviceAlice', note: 'from the phone' } },
+    survivors: [getPublicKey(frank)],
+  })
+  const rotB = await rotateScope(new LocalRelay(devB), alice, {
+    scopeId: md.scopeId, generation: 1, scopeName: 'Multi', seq: 2,
+    payload: { name: 'Multi', fields: { display_name: 'DeviceAlice', note: 'from the laptop' } },
+    survivors: [getPublicKey(grace)],
+  })
+  check('both devices Lamport-pick the same v — the collision (v=2, different keys)',
+    rotA.generation === 2 && rotB.generation === 2 && b64k(rotA.scopeKey) !== b64k(rotB.scopeKey))
+  replay(syncAB, devA, devB)  // the relay set converges, in opposite arrival orders
+  replay(syncBA, devB, devA)
+  const survivor = (r) => r.query({ kinds: [KIND_DATA_SET], authors: [getPublicKey(alice)], '#d': [md.scopeId] })
+  const [sAB] = survivor(syncAB), [sBA] = survivor(syncBA)
+  check('exactly one 30440 survives per NIP-01 — the same winner in both arrival orders',
+    survivor(syncAB).length === 1 && survivor(syncBA).length === 1 && sAB.id === sBA.id)
+  check("the winner is the later rotation (max created_at); its key — the laptop's — is authoritative",
+    decrypts(sAB.content, rotB.scopeKey) && !decrypts(sAB.content, rotA.scopeKey))
+  const shared = new LocalRelay(syncAB)
+  const frankBook = await addressBook(shared, frank)
+  check('survivor granted by the LOSING device holds the losing key: stale (same-v MAC fail) — detected, not silent',
+    frankBook.length === 1 && frankBook[0].generation === 2 && frankBook[0].status === 'stale')
+  check('survivor granted by the winning device reads ok',
+    (await addressBook(shared, grace))[0]?.status === 'ok')
+  // The mergeable index is what surfaces the collision. Fixed mtimes keep
+  // the stage deterministic: the laptop's entry is the later modification.
+  const idxA = { issued: [toIssuedEntry({ scopeName: 'Multi', ...rotA, mtime: 1000 }, [getPublicKey(frank)])], received: [] }
+  const idxB = { issued: [toIssuedEntry({ scopeName: 'Multi', ...rotB, mtime: 1001 }, [getPublicKey(grace)])], received: [] }
+  const localMerge = mergeGrantIndex(idxA, idxB)
+  check('index merge: ONE issued entry survives (greater mtime), flagged conflicted, grantees UNIONED — and the merge commutes',
+    localMerge.issued.length === 1 && localMerge.issued[0].key === b64k(rotB.scopeKey)
+    && localMerge.issued[0].conflicted === true
+    && [getPublicKey(frank), getPublicKey(grace)].every(p => localMerge.issued[0].grantees.includes(p))
+    && JSON.stringify(mergeGrantIndex(idxB, idxA)) === JSON.stringify(localMerge))
+  const loserView = await reconcile(shared, alice, idxA)
+  check('the losing device detects it lost (same-v MAC fail against the survivor) and flags its entry for the next merge',
+    loserView.issued[0].conflicted === true)
+  // Concurrent index writes through the relay: the phone saves; the
+  // laptop's save must load-merge-publish, never overwrite (pre-P3 the
+  // second write silently dropped Frank).
+  await saveGrantIndex(shared, alice, idxA)
+  await saveGrantIndex(shared, alice, idxB)
+  const published = await loadGrantIndex(shared, alice)
+  check("merge-on-write: the second device's index write carries BOTH devices' edits — nothing clobbered",
+    published.issued.length === 1 && published.issued[0].conflicted === true
+    && [getPublicKey(frank), getPublicKey(grace)].every(p => published.issued[0].grantees.includes(p)))
+  // Reconcile from the merged index: the device holding the authoritative
+  // key re-grants it — same v, later issuedAt — to the whole grantee union.
+  const reconciled = await reconcile(shared, alice, published)
+  await saveGrantIndex(shared, alice, reconciled)
+  check('reconcile re-grants the authoritative key and clears the flag',
+    reconciled.issued[0].conflicted === undefined && reconciled.issued[0].key === b64k(rotB.scopeKey))
+  const frankAfter = await addressBook(shared, frank)
+  check('the stranded survivor recovers with no action of his own: latest-issued grant at equal v wins → ok — no permanent stale',
+    frankAfter.length === 1 && frankAfter[0].status === 'ok'
+    && frankAfter[0].data.fields.note === 'from the laptop')
+  // Received-side divergence, tombstones, and the cursor: one device adds
+  // a contact while another removes one — removal is a TOMBSTONE, not an
+  // omission, so a lagging device's merge cannot resurrect it.
+  const m1 = mergeGrantIndex(
+    { issued: [], received: [{ a: '30440:pub:s1', v: 1, key: 'K1', mtime: 100 },
+                             { a: '30440:pub:s2', v: 1, key: 'K2', mtime: 300 }],
+      inbox: { since: 100, ids: ['w1', 'w2'] } },
+    { issued: [], received: [{ a: '30440:pub:s1', v: 1, key: 'K1', mtime: 100 },
+                             { a: '30440:pub:s3', deleted: true, mtime: 200 }],
+      inbox: { since: 200, ids: ['w2', 'w3'] } })
+  check("divergent received edits merge without loss: union carries both devices' entries, tombstone standing",
+    m1.received.length === 3 && m1.received.some(e => e.a.endsWith(':s2'))
+    && m1.received.find(e => e.a.endsWith(':s3'))?.deleted === true)
+  check('inbox cursor merges by max(since) + id union',
+    m1.inbox.since === 200 && ['w1', 'w2', 'w3'].every(id => m1.inbox.ids.includes(id)))
+  check('a lagging device merging later cannot resurrect the tombstoned entry (max mtime keeps the tombstone)',
+    mergeGrantIndex(m1, { issued: [], received: [{ a: '30440:pub:s3', v: 1, key: 'K3', mtime: 100 }] })
+      .received.find(e => e.a.endsWith(':s3'))?.deleted === true)
+  // Tombstones are carried, never dereferenced: Frank's index round-trips
+  // one and his warm-start book skips it.
+  const fg = await receiveGrants(shared, frank)
+  await saveGrantIndex(shared, frank, {
+    issued: [],
+    received: [...latestGrants(fg).map(g => toReceivedEntry(g, 'alice')),
+               { a: `${KIND_DATA_SET}:${getPublicKey(alice)}:gone`, deleted: true, mtime: 400 }],
+    inbox: fg.cursor,
+  })
+  const frankIdx = await loadGrantIndex(shared, frank)
+  const frankWarm = await addressBook(shared, frank, { index: frankIdx })
+  check('tombstoned entries ride the index but are never dereferenced (warm start skips them)',
+    frankIdx.received.some(e => e.deleted) && frankWarm.every(e => e.scopeId !== 'gone')
+    && frankWarm.find(e => e.scopeId === md.scopeId)?.status === 'ok')
+  // The sharpest tie: rivals equal in created_at too (two devices within
+  // one second). NIP-01 keeps the lexicographically LOWEST id, and the
+  // freshness comparator ends in the same tiebreak — so every relay
+  // (either arrival order) and every fanout reader (either half-view)
+  // lands on the same event without coordination.
+  const tieId = 'st' + Math.random().toString(36).slice(2, 8)
+  const rival = (note) => finalizeEvent({
+    kind: KIND_DATA_SET, created_at: 1900000000,
+    tags: [['d', tieId], ['v', '2'], ['u', '2']],
+    content: nip44.v2.encrypt(JSON.stringify({ name: 'Tie', fields: { note } }), newScopeKey()),
+  }, alice)
+  const e1 = rival('rival one'), e2 = rival('rival two')
+  const lowest = e1.id < e2.id ? e1 : e2
+  const t1 = new Relay(), t2 = new Relay()
+  t1.publish(e1); t1.publish(e2)
+  t2.publish(e2); t2.publish(e1)
+  const tq = (r) => r.query({ kinds: [KIND_DATA_SET], '#d': [tieId] })
+  check('same-second same-v tie: both arrival orders retain the lexicographically lowest id (NIP-01)',
+    tq(t1).length === 1 && tq(t1)[0].id === lowest.id && tq(t2)[0].id === lowest.id)
+  const h1 = new Relay(), h2 = new Relay()
+  h1.publish(e1); h2.publish(e2)
+  check('fanout across relays that each saw only ONE rival picks the same winner (comparator id tiebreak)',
+    (await new LocalRelay(h1, h2).query({ kinds: [KIND_DATA_SET], '#d': [tieId] }))[0].id === lowest.id)
+  // Lamport, second half: after syncing, a device whose LOCAL record still
+  // says v=1 rotates again — it joins the observed v=2 and picks 3; it can
+  // never collide backwards.
+  const rot3 = await rotateScope(shared, alice, {
+    scopeId: md.scopeId, generation: 1, scopeName: 'Multi',
+    payload: { name: 'Multi', fields: { display_name: 'DeviceAlice', note: 'post-sync rotation' } },
+    survivors: [getPublicKey(frank), getPublicKey(grace)],
+  })
+  check('a device with stale local state rotates to max(observed v)+1, not local+1', rot3.generation === 3)
+  // P6 interaction — both devices rotate AND move the scope, to DIFFERENT
+  // fresh d's. No relay-level collision exists (each new d holds one event;
+  // only the two old-d tombstones collide, both throwaway): the fork lives
+  // in the index, keyed by the shared lineage `prev`, and merge + reconcile
+  // converge it to ONE live identity.
+  const heidi = generateSecretKey()
+  const fdA = new Relay(), fdB = new Relay(), fsync = new Relay()
+  const fk = { scopeId: 'sk' + Math.random().toString(36).slice(2, 8), generation: 1, scopeKey: newScopeKey() }
+  await publishScope(new LocalRelay(fdA, fdB, fsync), alice, { ...fk, payload: { name: 'Fork', fields: { note: 'seed' } } })
+  await grant(new LocalRelay(fdA, fdB, fsync), alice, getPublicKey(heidi), { ...fk, scopeName: 'Fork' })
+  const dNewA = 'fa' + Math.random().toString(36).slice(2, 8)
+  const dNewB = 'fb' + Math.random().toString(36).slice(2, 8)
+  const mvA = await rotateScope(new LocalRelay(fdA), alice, {
+    scopeId: fk.scopeId, generation: 1, scopeName: 'Fork', seq: 2, newScopeId: dNewA,
+    payload: { name: 'Fork', fields: { note: 'branch A' } }, survivors: [getPublicKey(heidi)],
+  })
+  const mvB = await rotateScope(new LocalRelay(fdB), alice, {
+    scopeId: fk.scopeId, generation: 1, scopeName: 'Fork', seq: 2, newScopeId: dNewB,
+    payload: { name: 'Fork', fields: { note: 'branch B' } }, survivors: [getPublicKey(heidi)],
+  })
+  replay(fsync, fdA, fdB)
+  check('moved rotations record their lineage (prev = old d) for fork detection',
+    mvA.prev === fk.scopeId && mvB.prev === fk.scopeId && mvA.scopeId === dNewA && mvB.scopeId === dNewB)
+  const fIdx = mergeGrantIndex(
+    { issued: [toIssuedEntry({ scopeName: 'Fork', ...mvA, mtime: 500 }, [getPublicKey(heidi)])], received: [] },
+    { issued: [toIssuedEntry({ scopeName: 'Fork', ...mvB, mtime: 501 }, [getPublicKey(heidi)])], received: [] })
+  const liveEntries = fIdx.issued.filter(e => !e.deleted)
+  check('double-move fork: the merge keeps ONE live identity (same prev+v) and tombstones the dead branch',
+    liveEntries.length === 1 && liveEntries[0].scope === dNewB && liveEntries[0].conflicted === true
+    && liveEntries[0].strand?.includes(dNewA)
+    && fIdx.issued.find(e => e.scope === dNewA)?.deleted === true)
+  const fFixed = await reconcile(new LocalRelay(fsync), alice, fIdx)
+  const heidiBook = await addressBook(new LocalRelay(fsync), heidi)
+  check('after reconcile the survivor converges on ONE live address: winner ok, dead branch and old d both stranded stale',
+    heidiBook.find(e => e.scopeId === dNewB)?.status === 'ok'
+    && heidiBook.find(e => e.scopeId === dNewA)?.status === 'stale'
+    && heidiBook.find(e => e.scopeId === fk.scopeId)?.status === 'stale'
+    && fFixed.issued.find(e => e.scope === dNewB)?.conflicted === undefined)
 
   console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m`)
   relay.close()
