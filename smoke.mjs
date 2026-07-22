@@ -8,11 +8,11 @@
 // data only — everything published is ciphertext, but treat public relays
 // as public.
 
-import { generateSecretKey, getPublicKey, nip59 } from 'nostr-tools'
+import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey, nip44, nip59 } from 'nostr-tools'
 import { Relay } from './relay.mjs'
 import { LiveRelay, LocalRelay } from './liverelay.mjs'
 import {
-  KIND_DATA_SET, KIND_GRANT,
+  KIND_DATA_SET, KIND_GRANT, WRAP_OVERLAP,
   newScopeKey, publishScope, grant, rotateScope, deleteScope, addressBook,
   receiveGrants, latestGrants, fetchScope,
   saveGrantIndex, loadGrantIndex, toReceivedEntry, fromReceivedEntry,
@@ -37,6 +37,15 @@ const check = (name, ok, detail = '') => {
   console.log(`  ${ok ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m'}  ${name}${detail ? ` — ${detail}` : ''}`)
   ok ? passed++ : failed++
 }
+
+/** Pass-through relay recording every query filter, so a test can see
+ *  whether a scan was incremental (the 1059 filter carried `since`)
+ *  without instrumenting the lib. Works over LocalRelay and LiveRelay. */
+const spy = (inner) => ({
+  filters: [],
+  publish: (e) => inner.publish(e),
+  query(f) { this.filters.push(f); return inner.query(f) },
+})
 
 const alice = generateSecretKey()
 const bob = generateSecretKey()
@@ -195,6 +204,79 @@ try {
   const behind = await fetchScope(new LocalRelay(B), fanRec, { highWater: { v: 1, u: merged.seq } })
   check('relay B alone, below the fanout-learned mark, reads rollback',
     behind.status === 'rollback')
+
+  console.log('\n11. Incremental grantee inbox (warm start + since cursor)')
+  // Grants share the 1059 inbox with NIP-17 DMs and the inner kind is
+  // encrypted, so the relay can never be asked for "grants only" — what P4
+  // bounds is the scan, via the inbox cursor. The correctness hazard is
+  // NIP-59's timestamp fuzz: a wrap delivered AFTER a scan can be
+  // timestamped up to two days BEFORE everything that scan saw, so a naive
+  // since = checkpoint silently loses it. Deterministic here: the late wrap
+  // is hand-built with created_at pinned one hour behind the checkpoint.
+  const full = await receiveGrants(relay, bob)
+  const cursor = full.cursor
+  const bobWraps = await relay.query({ kinds: [1059], '#p': [getPublicKey(bob)] })
+  check('full scan returns the cursor to persist (since = max wrap created_at)',
+    cursor.since === Math.max(...bobWraps.map(w => w.created_at))
+    && cursor.ids.length === bobWraps.length)
+  // Persist cache + cursor in ONE index write (a cursor ahead of its cache
+  // would hide grants), then warm-start from the round-tripped index.
+  await saveGrantIndex(relay, bob, {
+    issued: [],
+    received: latestGrants(full).map(g => toReceivedEntry(g, 'alice')),
+    inbox: cursor,
+  })
+  await settle()
+  const idx = await loadGrantIndex(relay, bob)
+  check('inbox cursor round-trips through the Grant Index', idx.inbox?.since === cursor.since)
+  const spyWarm = spy(relay)
+  const warmBook = await addressBook(spyWarm, bob, { index: idx })
+  const shape = (b) => b.map(e => `${e.publisher.slice(0, 8)}:${e.scopeId}:${e.status}`).sort().join(' ')
+  check('warm start from the index equals the full-scan address book',
+    shape(warmBook) === shape(await addressBook(relay, bob)))
+  const warmSince = spyWarm.filters.find(f => f.kinds?.includes(1059))?.since
+  check('warm-start wrap scan was incremental: 1059 filter carried since = checkpoint − overlap',
+    warmSince === cursor.since - WRAP_OVERLAP)
+  check('nothing new → every in-window wrap deduped by id, cursor unchanged',
+    warmBook.cursor.since === cursor.since
+    && [...warmBook.cursor.ids].sort().join() === [...cursor.ids].sort().join())
+
+  // A grant "delivered" after the checkpoint but timestamped inside the
+  // overlap window — nipxx's own giftWrap fuzzes randomly, so build the
+  // wrap by hand (same NIP-59 construction) to pin created_at.
+  const late = { scopeId: 'si' + Math.random().toString(36).slice(2, 8), generation: 1, scopeKey: newScopeKey() }
+  await publishScope(relay, alice, { ...late, payload: { name: 'Inbox', fields: { note: 'late delivery' } } })
+  const backTs = cursor.since - 3600
+  const conv = nip44.v2.utils.getConversationKey
+  const rumor = {
+    pubkey: getPublicKey(alice), kind: KIND_GRANT, created_at: backTs,
+    tags: [['a', `${KIND_DATA_SET}:${getPublicKey(alice)}:${late.scopeId}`, ''], ['v', '1']],
+    content: JSON.stringify({ scope_key: Buffer.from(late.scopeKey).toString('base64'), scope_name: 'Inbox' }),
+  }
+  rumor.id = getEventHash(rumor)
+  const seal = finalizeEvent({ kind: 13, created_at: backTs, tags: [],
+    content: nip44.v2.encrypt(JSON.stringify(rumor), conv(alice, getPublicKey(bob))) }, alice)
+  const eph = generateSecretKey()
+  const lateWrap = finalizeEvent({ kind: 1059, created_at: backTs, tags: [['p', getPublicKey(bob)]],
+    content: nip44.v2.encrypt(JSON.stringify(seal), conv(eph, getPublicKey(bob))) }, eph)
+  await relay.publish(lateWrap)
+  await settle()
+  const naive = await relay.query({ kinds: [1059], '#p': [getPublicKey(bob)], since: cursor.since })
+  check('naive since = checkpoint MISSES the backdated wrap (the bug P4 must not have)',
+    !naive.some(w => w.id === lateWrap.id))
+  const inc = await receiveGrants(relay, bob, { since: cursor.since, seenIds: cursor.ids })
+  check('incremental scan (checkpoint − overlap) returns exactly the new grant',
+    inc.length === 1 && inc[0].scopeId === late.scopeId
+    && inc.cursor.since === cursor.since && inc.cursor.ids.includes(lateWrap.id))
+  const spyMerge = spy(relay)
+  const mergedBook = await addressBook(spyMerge, bob, { index: idx })
+  check('merged warm book carries old and new scopes — still no full re-scan',
+    mergedBook.find(e => e.scopeId === late.scopeId)?.data?.fields?.note === 'late delivery'
+    && mergedBook.find(e => e.scopeId === basic.scopeId)?.status === 'ok'
+    && spyMerge.filters.find(f => f.kinds?.includes(1059))?.since === cursor.since - WRAP_OVERLAP)
+  const again = await receiveGrants(relay, bob, { since: inc.cursor.since, seenIds: inc.cursor.ids })
+  check('overlapping re-scan double-processes nothing (dedup by wrap id)',
+    again.length === 0 && again.cursor.since === inc.cursor.since)
 
   console.log(`\n${failed === 0 ? '\x1b[32m' : '\x1b[31m'}${passed} passed, ${failed} failed\x1b[0m`)
   relay.close()

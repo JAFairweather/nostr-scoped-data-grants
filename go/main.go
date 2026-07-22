@@ -6,8 +6,9 @@
 //	go run . publish    -sk <hex> -scope <id> -gen <n> -seq <n> -key <b64> -payload <json>
 //	go run . grant      -sk <hex> -to <pubhex> -scope <id> -gen <n> -key <b64> -name <name>
 //	go run . book       -sk <hex>                 # grantee address book → JSON
-//	go run . index-save -sk <hex>                 # fold received grants into kind-10440
-//	go run . index-book -sk <hex>                 # address book from the index alone → JSON
+//	go run . index-save -sk <hex>                 # fold received grants (+ inbox cursor) into kind-10440
+//	go run . index-book -sk <hex>                 # address book from the index: warm cache, then
+//	                                              # incremental wrap scan when it carries an inbox cursor
 //
 // All commands accept -relays wss://a,wss://b (defaults below).
 package main
@@ -208,7 +209,32 @@ type bookEntry struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
-func receiveGrants(pool *nostr.SimplePool, urls []string, sk string) []grantRec {
+// inboxCursor is the grantee's persisted inbox cursor — the Grant Index
+// `inbox` member (SPEC "Discovering new grants"). Since is the highest
+// kind-1059 created_at already processed; Ids the wrap ids (grants and
+// DMs alike) already processed within the trailing randomization window.
+type inboxCursor struct {
+	Since nostr.Timestamp `json:"since"`
+	Ids   []string        `json:"ids"`
+}
+
+// wrapOverlap is NIP-59's timestamp-randomization window (two days): wrap
+// created_at is canonically backdated by up to this much, so a wrap
+// delivered after a scan may be timestamped older than everything that
+// scan saw. An incremental query must reach this far behind its checkpoint
+// — since = checkpoint would silently lose such grants — and, scans thus
+// overlapping, dedup by wrap id keeps the overlap from being unwrapped
+// twice. Same constant as the JS lib's WRAP_OVERLAP.
+const wrapOverlap = 2 * 24 * 60 * 60
+
+// receiveGrants collects and unwraps grants addressed to this keyholder.
+// cur == nil is the historical full scan — unavoidable on cold recovery,
+// since grants share kind 1059 with NIP-17 DMs and the inner kind is
+// encrypted (an intended NIP-59 property; relays cannot pre-filter). With
+// a cursor the scan is incremental per the wrapOverlap rules above. The
+// advanced cursor is returned for the caller to persist together with the
+// grants it accounts for; its id set is pruned to the trailing window.
+func receiveGrants(pool *nostr.SimplePool, urls []string, sk string, cur *inboxCursor) ([]grantRec, inboxCursor) {
 	pub, _ := nostr.GetPublicKey(sk)
 	decrypt := func(otherPub, ct string) (string, error) {
 		ck, err := nip44.GenerateConversationKey(otherPub, sk)
@@ -217,10 +243,32 @@ func receiveGrants(pool *nostr.SimplePool, urls []string, sk string) []grantRec 
 		}
 		return nip44.Decrypt(ct, ck)
 	}
+	f := nostr.Filter{Kinds: []int{1059}, Tags: nostr.TagMap{"p": []string{pub}}}
+	known := map[string]bool{}
+	next := inboxCursor{Ids: []string{}}
+	if cur != nil {
+		next.Since = cur.Since
+		if s := cur.Since - wrapOverlap; s > 0 {
+			f.Since = &s
+		}
+		for _, id := range cur.Ids {
+			known[id] = true
+		}
+	}
+	wraps := query(pool, urls, f)
+	for _, ev := range wraps {
+		if ev.CreatedAt > next.Since {
+			next.Since = ev.CreatedAt
+		}
+	}
 	var out []grantRec
-	for _, ev := range query(pool, urls, nostr.Filter{
-		Kinds: []int{1059}, Tags: nostr.TagMap{"p": []string{pub}},
-	}) {
+	for _, ev := range wraps {
+		if ev.CreatedAt >= next.Since-wrapOverlap {
+			next.Ids = append(next.Ids, ev.ID) // reappears next scan: remember it
+		}
+		if known[ev.ID] {
+			continue // overlap dedup: processed on a prior scan
+		}
 		rumor, err := nip59.GiftUnwrap(*ev, decrypt)
 		if err != nil || rumor.Kind != kindGrant {
 			continue
@@ -251,7 +299,7 @@ func receiveGrants(pool *nostr.SimplePool, urls []string, sk string) []grantRec 
 			Generation: gen, key: keyFromB64(c.ScopeKey),
 		})
 	}
-	return out
+	return out, next
 }
 
 // Keep only the newest grant per (publisher, scope) — key rotations supersede.
@@ -308,8 +356,9 @@ func fetchScope(pool *nostr.SimplePool, urls []string, g grantRec) bookEntry {
 }
 
 func cmdBook(pool *nostr.SimplePool, urls []string, sk string) {
+	grants, _ := receiveGrants(pool, urls, sk, nil) // stateless CLI: full scan
 	var book []bookEntry
-	for _, g := range latestGrants(receiveGrants(pool, urls, sk)) {
+	for _, g := range latestGrants(grants) {
 		book = append(book, fetchScope(pool, urls, g))
 	}
 	printJSON(book)
@@ -332,11 +381,17 @@ type receivedEntry struct {
 type grantIndex struct {
 	Issued   []json.RawMessage `json:"issued"`
 	Received []receivedEntry   `json:"received"`
+	// Inbox is the optional inbox cursor (SPEC "Discovering new grants"),
+	// written next to the received entries it accounts for — one replaceable
+	// event updates cache and cursor atomically. Absent in indexes from
+	// writers that do not maintain it; readers then fall back to a full scan.
+	Inbox *inboxCursor `json:"inbox,omitempty"`
 }
 
 func cmdIndexSave(pool *nostr.SimplePool, urls []string, fs *flag.FlagSet, sk string) {
-	index := grantIndex{Issued: []json.RawMessage{}, Received: []receivedEntry{}}
-	for _, g := range latestGrants(receiveGrants(pool, urls, sk)) {
+	grants, cursor := receiveGrants(pool, urls, sk, nil)
+	index := grantIndex{Issued: []json.RawMessage{}, Received: []receivedEntry{}, Inbox: &cursor}
+	for _, g := range latestGrants(grants) {
 		index.Received = append(index.Received, receivedEntry{
 			A: fmt.Sprintf("%d:%s:%s", kindDataSet, g.Publisher, g.ScopeID),
 			V: g.Generation, Key: base64.StdEncoding.EncodeToString(g.key[:]),
@@ -355,8 +410,14 @@ func cmdIndexSave(pool *nostr.SimplePool, urls []string, fs *flag.FlagSet, sk st
 	publish(pool, urls, ev)
 }
 
-// Recovery path: the address book from the nsec alone — load the index,
-// dereference each received entry. No gift-wrap scan, no local state.
+// Recovery path: the address book from the nsec alone — load the index and
+// warm-start per SPEC "Discovering new grants". The received entries are
+// the cache (nothing is unwrapped for them); when the index carries an
+// inbox cursor — written by either implementation — an incremental wrap
+// scan bounded to the overlap window merges in whatever arrived since the
+// snapshot. Cache entries come first, so on equal generation the user's
+// earlier acceptance wins and a fresh discovery supersedes only by higher
+// generation. No cursor → the book is served from the index alone.
 func cmdIndexBook(pool *nostr.SimplePool, urls []string, sk string) {
 	pub, _ := nostr.GetPublicKey(sk)
 	events := query(pool, urls, nostr.Filter{Kinds: []int{kindGrantIndex}, Authors: []string{pub}})
@@ -371,16 +432,24 @@ func cmdIndexBook(pool *nostr.SimplePool, urls []string, sk string) {
 	if err := json.Unmarshal([]byte(pt), &index); err != nil {
 		fatal("parse index: %s", err)
 	}
-	var book []bookEntry
+	var recs []grantRec
 	for _, r := range index.Received {
 		parts := strings.Split(r.A, ":")
 		if len(parts) != 3 {
 			continue
 		}
-		book = append(book, fetchScope(pool, urls, grantRec{
+		recs = append(recs, grantRec{
 			Publisher: parts[1], ScopeID: parts[2],
 			Generation: r.V, key: keyFromB64(r.Key),
-		}))
+		})
+	}
+	if index.Inbox != nil {
+		fresh, _ := receiveGrants(pool, urls, sk, index.Inbox)
+		recs = append(recs, fresh...)
+	}
+	var book []bookEntry
+	for _, g := range latestGrants(recs) {
+		book = append(book, fetchScope(pool, urls, g))
 	}
 	printJSON(book)
 }
