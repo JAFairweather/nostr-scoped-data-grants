@@ -161,17 +161,37 @@ export async function grant(relay, publisherSecret, granteePubkey,
  * new key, and re-grant only the survivors. The revoked party keeps whatever
  * plaintext they already decrypted (unavoidable, and honest to say so) but is
  * cut off from all future updates.
+ *
+ * `newScopeId` (optional) moves the scope to a fresh `d` in the same
+ * rotation — metadata hardening at no extra grant cost, since every survivor
+ * is re-granted anyway and the new address rides in the same gift wrap as
+ * the new key (SPEC "Metadata-hardening profile", item 1). The new
+ * generation is published under the new `d` as a NEW scope identity: its
+ * content sequence restarts (a continued `u` would re-link, for an
+ * observing relay, exactly the histories the move severs), and the old
+ * address is stranded behind a deleteScope-style tombstone — empty payload,
+ * throwaway key, same bumped generation, the old identity's next `u` — but
+ * no NIP-09: the address is abandoned, not deleted. An explicit `seq`
+ * applies to that tombstone (the sequence the caller was tracking). The
+ * returned `scopeId` is the live identity — fold it into the Grant Index
+ * `issued` entry, whose `scope` thereby moves too.
  */
 export async function rotateScope(relay, publisherSecret,
-                                  { scopeId, generation, payload, scopeName, survivors, seq }) {
+                                  { scopeId, generation, payload, scopeName, survivors, seq, newScopeId }) {
   const scopeKey = newScopeKey()
   const next = generation + 1
+  const liveId = newScopeId ?? scopeId
   // A rotation is also a publish, so `u` bumps too (tracker default, or the
   // caller's explicit seq); the new mark is returned alongside the new key.
-  const pub = await publishScope(relay, publisherSecret, { scopeId, generation: next, scopeKey, payload, seq })
+  // A moved scope instead starts its sequence fresh — see above.
+  const pub = await publishScope(relay, publisherSecret,
+    { scopeId: liveId, generation: next, scopeKey, payload, seq: newScopeId ? undefined : seq })
+  if (newScopeId)
+    await publishScope(relay, publisherSecret,
+      { scopeId, generation: next, scopeKey: newScopeKey(), payload: {}, seq })
   for (const pubkey of survivors)
-    await grant(relay, publisherSecret, pubkey, { scopeId, generation: next, scopeKey, scopeName })
-  return { scopeKey, generation: next, seq: pub.seq }
+    await grant(relay, publisherSecret, pubkey, { scopeId: liveId, generation: next, scopeKey, scopeName })
+  return { scopeKey, generation: next, seq: pub.seq, scopeId: liveId }
 }
 
 /**
@@ -197,6 +217,23 @@ export async function deleteScope(relay, publisherSecret, { scopeId, generation,
   })
   const receipt = await relay.publish(event)
   return { event, ...receipt }
+}
+
+/**
+ * Metadata hardening, item 4 (SPEC "Metadata-hardening profile"): pad a
+ * payload so its serialized JSON lands exactly on a `bucketBytes` boundary
+ * before encryption. NIP-44's own padding is fine-grained enough that a
+ * field-level edit can still hop size classes; equal-length plaintexts make
+ * equal-length ciphertexts, so payloads padded to the same bucket share one
+ * class (publishScope's appended `updated_at` adds a constant, preserving
+ * the equality). The filler rides in the reserved top-level `pad` member,
+ * which readers ignore like any other unrecognized member. Opt-in per
+ * publish: publishScope(relay, sk, { ..., payload: padTo(payload, 1024) }).
+ */
+export function padTo(payload, bucketBytes) {
+  const bytes = (s) => new TextEncoder().encode(s).length
+  const bare = bytes(JSON.stringify({ ...payload, pad: '' }))
+  return { ...payload, pad: '='.repeat(Math.ceil(bare / bucketBytes) * bucketBytes - bare) }
 }
 
 // ---------------------------------------------------------------- grantee
@@ -327,6 +364,19 @@ export async function fetchScope(relay, grantRecord, { highWater } = {}) {
   } catch {
     return { status: 'stale', generation, seq } // MAC failure — wrong (rotated) key
   }
+}
+
+/**
+ * Metadata hardening, item 2 (SPEC "Metadata-hardening profile"): decouple
+ * an action from the event that prompted it. Waits a uniform random
+ * 0..maxMs, then runs `fn` — e.g. jitterFetch(() => fetchScope(relay, g),
+ * 90_000) after a grant arrives, so a relay seeing both the wrap delivery
+ * and the first fetch of the granted address cannot line the two up on the
+ * clock. Widens the correlation window; does not close it (SPEC Security 4).
+ */
+export async function jitterFetch(fn, maxMs) {
+  await new Promise(r => setTimeout(r, Math.random() * maxMs))
+  return fn()
 }
 
 /**
