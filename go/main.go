@@ -3,22 +3,25 @@
 // counterpart to the JS reference lib (../nipxx.mjs); the two share nothing
 // but the wire format.
 //
-//	go run . publish    -sk <hex> -scope <id> -gen <n> -seq <n> -key <b64> -payload <json>
-//	go run . grant      -sk <hex> -to <pubhex> -scope <id> -gen <n> -key <b64> -name <name>
-//	go run . book       -sk <hex>                 # grantee address book → JSON
-//	go run . index-save -sk <hex>                 # fold received grants (+ inbox cursor) into kind-10440
-//	go run . index-book -sk <hex>                 # address book from the index: warm cache, then
+//	go run . publish    -sk-file <path> -scope <id> -gen <n> -seq <n> -key-file <path> -payload <json>
+//	go run . grant      -sk-file <path> -to <pubhex> -scope <id> -gen <n> -key-file <path> -name <name>
+//	go run . book       -sk-file <path>                 # grantee address book → JSON
+//	go run . index-save -sk-file <path>                 # fold received grants (+ inbox cursor) into kind-10440
+//	go run . index-book -sk-file <path>                 # address book from the index: warm cache, then
 //	                                              # incremental wrap scan when it carries an inbox cursor
 //
-// All commands accept -relays wss://a,wss://b (defaults below).
+// Use - as a key file path to read from stdin. All commands accept -relays
+// wss://a,wss://b (defaults below).
 package main
 
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -121,6 +124,32 @@ func keyFromB64(s string) [32]byte {
 	return k
 }
 
+func readKey(path, label string) string {
+	if path == "" {
+		fatal("-%s-file is required", label)
+	}
+	var b []byte
+	var err error
+	if path == "-" {
+		b, err = io.ReadAll(os.Stdin)
+	} else {
+		b, err = os.ReadFile(path)
+	}
+	if err != nil {
+		fatal("read %s key: %s", label, err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func readSigningKey(path string) string {
+	sk := readKey(path, "sk")
+	b, err := hex.DecodeString(sk)
+	if err != nil || len(b) != 32 {
+		fatal("signing key must be 32 bytes of hex")
+	}
+	return sk
+}
+
 // NIP-44 to self, as in NIP-51 private items — for the Grant Index.
 func selfKey(sk string) [32]byte {
 	pub, _ := nostr.GetPublicKey(sk)
@@ -136,7 +165,7 @@ func selfKey(sk string) [32]byte {
 func cmdPublish(pool *nostr.SimplePool, urls []string, fs *flag.FlagSet, sk string) {
 	scope := fs.Lookup("scope").Value.String()
 	gen := fs.Lookup("gen").Value.String()
-	key := keyFromB64(fs.Lookup("key").Value.String())
+	key := keyFromB64(readKey(fs.Lookup("key-file").Value.String(), "key"))
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(fs.Lookup("payload").Value.String()), &payload); err != nil {
 		fatal("payload must be JSON: %s", err)
@@ -160,8 +189,10 @@ func cmdPublish(pool *nostr.SimplePool, urls []string, fs *flag.FlagSet, sk stri
 func cmdGrant(pool *nostr.SimplePool, urls []string, fs *flag.FlagSet, sk string) {
 	pub, _ := nostr.GetPublicKey(sk)
 	to := fs.Lookup("to").Value.String()
+	scopeKey := readKey(fs.Lookup("key-file").Value.String(), "key")
+	keyFromB64(scopeKey)
 	content, _ := json.Marshal(map[string]string{
-		"scope_key":  fs.Lookup("key").Value.String(),
+		"scope_key":  scopeKey,
 		"scope_name": fs.Lookup("name").Value.String(),
 	})
 	// The grant is an unsigned rumor, sealed and gift-wrapped per NIP-59:
@@ -492,34 +523,32 @@ func main() {
 		fatal("usage: nipxx <publish|grant|book|index-save|index-book> [flags]")
 	}
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
-	sk := fs.String("sk", "", "secret key (hex)")
+	skFile := fs.String("sk-file", "", "signing key file (hex; - for stdin)")
 	relays := fs.String("relays", defaultRelays, "comma-separated relay urls")
 	fs.String("scope", "", "scope id (opaque)")
 	fs.String("gen", "1", "key generation")
 	fs.String("seq", "1", "content sequence (u tag; strictly increasing per scope)")
-	fs.String("key", "", "scope key (base64, 32 bytes)")
+	fs.String("key-file", "", "scope key file (base64, 32 bytes; - for stdin)")
 	fs.String("payload", "{}", "payload JSON")
 	fs.String("to", "", "grantee pubkey (hex)")
 	fs.String("name", "", "human-readable scope name")
 	fs.String("petname", "", "petname for the publisher")
 	fs.Parse(os.Args[2:])
-	if *sk == "" {
-		fatal("-sk is required")
-	}
+	sk := readSigningKey(*skFile)
 	urls := strings.Split(*relays, ",")
 	pool := nostr.NewSimplePool(context.Background())
 
 	switch os.Args[1] {
 	case "publish":
-		cmdPublish(pool, urls, fs, *sk)
+		cmdPublish(pool, urls, fs, sk)
 	case "grant":
-		cmdGrant(pool, urls, fs, *sk)
+		cmdGrant(pool, urls, fs, sk)
 	case "book":
-		cmdBook(pool, urls, *sk)
+		cmdBook(pool, urls, sk)
 	case "index-save":
-		cmdIndexSave(pool, urls, fs, *sk)
+		cmdIndexSave(pool, urls, fs, sk)
 	case "index-book":
-		cmdIndexBook(pool, urls, *sk)
+		cmdIndexBook(pool, urls, sk)
 	default:
 		fatal("unknown command %q", os.Args[1])
 	}

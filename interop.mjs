@@ -7,6 +7,9 @@
 // Throwaway keys and dummy data only.
 
 import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { generateSecretKey, getPublicKey } from 'nostr-tools'
 import { LiveRelay } from './liverelay.mjs'
 import {
@@ -25,10 +28,24 @@ const b64 = (b) => Buffer.from(b).toString('base64')
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 const settle = () => sleep(1500)
 
-/** Run the Go CLI; parse its JSON output. */
-const go = (...args) => JSON.parse(
-  execFileSync('./go/nipxx', [...args, '-relays', RELAYS.join(',')],
-    { encoding: 'utf8', cwd: import.meta.dirname }).trim() || 'null')
+/** Pass the signing key on stdin and any scope key through a private file. */
+const go = (secretKey, args, scopeKey) => {
+  let dir
+  try {
+    if (scopeKey) {
+      dir = mkdtempSync(join(tmpdir(), 'nipxx-interop-'))
+      const keyFile = join(dir, 'scope-key')
+      writeFileSync(keyFile, b64(scopeKey), { mode: 0o600 })
+      args = [...args, '-key-file', keyFile]
+    }
+    return JSON.parse(execFileSync('./go/nipxx',
+      [...args, '-sk-file', '-', '-relays', RELAYS.join(',')],
+      { input: hex(secretKey) + '\n', encoding: 'utf8', cwd: import.meta.dirname }
+    ).trim() || 'null')
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true })
+  }
+}
 
 let passed = 0, failed = 0
 const check = (name, ok, detail = '') => {
@@ -46,7 +63,7 @@ try {
   await publishScope(relay, alice, { ...scope, payload: { name: 'Basic', fields: { display_name: 'InteropAlice', email: 'a@test.invalid' } } })
   await grant(relay, alice, getPublicKey(bob), { ...scope, scopeName: 'Basic' })
   await settle()
-  let goBook = go('book', '-sk', hex(bob)) ?? []
+  let goBook = go(bob, ['book']) ?? []
   const fromJs = goBook.find(e => e.publisher === getPublicKey(alice))
   check('Go decrypts JS-published scope via JS-issued grant',
     fromJs?.status === 'ok' && fromJs?.data?.fields?.display_name === 'InteropAlice')
@@ -54,10 +71,10 @@ try {
   console.log('\n2. Go publishes and grants → JS dereferences')
   const gScopeId = 'gx' + Math.random().toString(36).slice(2, 8)
   const gKey = newScopeKey()
-  go('publish', '-sk', hex(gopher), '-scope', gScopeId, '-gen', '1', '-key', b64(gKey),
-    '-payload', JSON.stringify({ name: 'GoBasic', fields: { display_name: 'InteropGopher', email: 'g@test.invalid' } }))
-  go('grant', '-sk', hex(gopher), '-to', getPublicKey(bob), '-scope', gScopeId, '-gen', '1',
-    '-key', b64(gKey), '-name', 'GoBasic')
+  go(gopher, ['publish', '-scope', gScopeId, '-gen', '1',
+    '-payload', JSON.stringify({ name: 'GoBasic', fields: { display_name: 'InteropGopher', email: 'g@test.invalid' } })], gKey)
+  go(gopher, ['grant', '-to', getPublicKey(bob), '-scope', gScopeId, '-gen', '1',
+    '-name', 'GoBasic'], gKey)
   await settle()
   const jsBook = await addressBook(relay, bob)
   const fromGo = jsBook.find(e => e.publisher === getPublicKey(gopher))
@@ -80,7 +97,7 @@ try {
   await publishScope(relay, alice, { ...scope, generation: 2, scopeKey: newScopeKey(),
     payload: { name: 'Basic', fields: { display_name: 'InteropAlice' } } })
   await settle()
-  goBook = go('book', '-sk', hex(bob)) ?? []
+  goBook = go(bob, ['book']) ?? []
   // A rotation is also a publish, so JS's auto-seq bumped u to 2 — Go must
   // read the rotated event's sequence along with the supersession.
   check('Go marks JS-rotated scope stale and reads its bumped u=2',
@@ -88,7 +105,7 @@ try {
     && goBook.find(e => e.publisher === getPublicKey(alice))?.seq === 2)
 
   console.log('\n4. Go writes the Grant Index → JS recovers from it')
-  go('index-save', '-sk', hex(bob), '-petname', 'friends')
+  go(bob, ['index-save', '-petname', 'friends'])
   await settle()
   // Go's index-save records the inbox cursor next to the received cache
   // (SPEC "Discovering new grants"); JS addressBook({ index }) warm-starts
@@ -109,7 +126,7 @@ try {
     inbox: all.cursor,  // cache + cursor in one write, per SPEC
   })
   await settle()
-  const goRecovered = go('index-book', '-sk', hex(bob)) ?? []
+  const goRecovered = go(bob, ['index-book']) ?? []
   check('Go recovers address book from JS-written kind-10440',
     goRecovered.some(e => e.publisher === getPublicKey(gopher) && e.status === 'ok'))
 
@@ -124,7 +141,7 @@ try {
   await publishScope(relay, alice, { ...late, payload: { name: 'Late', fields: { display_name: 'InteropLate' } } })
   await grant(relay, alice, getPublicKey(bob), { ...late, scopeName: 'Late' })
   await settle()
-  const caught = go('index-book', '-sk', hex(bob)) ?? []
+  const caught = go(bob, ['index-book']) ?? []
   check('Go index-book honors the JS-written inbox cursor and discovers the new grant',
     caught.find(e => e.scopeId === late.scopeId)?.status === 'ok'
     && caught.some(e => e.publisher === getPublicKey(gopher) && e.status === 'ok'))
@@ -144,7 +161,7 @@ try {
     scopeName: 'Late', survivors: [getPublicKey(bob)], newScopeId: dNew,
   })
   await settle()
-  const movedBook = go('book', '-sk', hex(bob)) ?? []
+  const movedBook = go(bob, ['book']) ?? []
   const movedTo = movedBook.find(e => e.scopeId === dNew)
   check('Go follows the JS d-rotation via the re-grant: new d ok at v=2, restarted u=1',
     movedTo?.status === 'ok' && movedTo?.generation === 2 && movedTo?.seq === 1
@@ -176,7 +193,7 @@ try {
   await publishScope(relay, alice, { scopeId: cs, generation: 2, scopeKey: winKey,
     payload: { name: 'Collide', fields: { display_name: 'LaptopAlice' } }, seq: 2 })
   await settle()
-  let goCollide = (go('book', '-sk', hex(bob)) ?? []).find(e => e.scopeId === cs)
+  let goCollide = (go(bob, ['book']) ?? []).find(e => e.scopeId === cs)
   check('Go converges on the NIP-01 winner and reports the losing-key holder stale (same v, MAC fail)',
     goCollide?.status === 'stale' && goCollide?.generation === 2 && goCollide?.seq === 2)
   const collidedIdx = mergeGrantIndex(
@@ -184,7 +201,7 @@ try {
     { issued: [toIssuedEntry({ scopeId: cs, scopeName: 'Collide', generation: 2, scopeKey: winKey, seq: 2, mtime: 1001 }, [])], received: [] })
   await reconcile(relay, alice, collidedIdx)
   await settle()
-  goCollide = (go('book', '-sk', hex(bob)) ?? []).find(e => e.scopeId === cs)
+  goCollide = (go(bob, ['book']) ?? []).find(e => e.scopeId === cs)
   check('after reconcile, Go recovers via the same-v re-grant (latest issuedAt wins): ok on the authoritative key',
     goCollide?.status === 'ok' && goCollide?.data?.fields?.display_name === 'LaptopAlice')
 
@@ -203,7 +220,7 @@ try {
     inbox: all2.cursor,
   })
   await settle()
-  const goMerged = go('index-book', '-sk', hex(bob)) ?? []
+  const goMerged = go(bob, ['index-book']) ?? []
   check('Go index-book reads mtime-bearing entries, skips the tombstone, and carries the reconciled key',
     goMerged.some(e => e.publisher === getPublicKey(gopher) && e.status === 'ok')
     && !goMerged.some(e => e.scopeId === 'phantom')

@@ -42,6 +42,21 @@ npm run interop       # 5 JS↔Go cross-implementation assertions (needs Go)
 npm run seed          # throwaway demo graph on live relays → prints a login key
 ```
 
+## Go CLI key input
+
+The Go CLI reads its signing key from `-sk-file` and, for `publish` or
+`grant`, its scope key from `-key-file`. Each file contains one hex signing
+key or base64 scope key, optionally followed by a newline. Use a private file
+or `-` to read one key from stdin; the two keys cannot both use stdin in the
+same command. Key values are never command-line arguments.
+
+```sh
+cd go
+go run . book -sk-file /path/to/private/signing-key
+go run . book -sk-file - < /path/to/private/signing-key
+go run . publish -sk-file - -key-file /path/to/private/scope-key -scope example -payload '{}' < /path/to/private/signing-key
+```
+
 ## Applications built on NIP-DA
 
 Four independent apps run on this protocol. Each lives in its own repo, ships
