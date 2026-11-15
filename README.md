@@ -87,6 +87,9 @@ with the printed key.
 | `441`   | Revocation notice (optional)   | NIP-59 seal + gift wrap        |
 | `10440` | Grant Index (replaceable)      | NIP-44 to self                 |
 
+Kinds `440`/`441` are also used, bare and signed, by the **capability grants** profile
+([`CAPABILITY-GRANTS.md`](CAPABILITY-GRANTS.md), proposal for Frontier C7); readers classify before acting.
+
 - **Live update** = republish `30440` under the same key; every grantee sees
   it on next fetch.
 - **Revocation** = rotate the scope key, bump `v`, republish, re-grant

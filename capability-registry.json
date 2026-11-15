@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "status": "proposal (Frontier C7); normative text in CAPABILITY-GRANTS.md section 4",
+  "closed": true,
+  "capabilities": {
+    "admit":        { "status": "active",            "subject": "channel_uuid",       "grantee_not_grantor": false, "required_tags": [] },
+    "admit+read":   { "status": "issuance_disabled", "subject": "channel_uuid",       "grantee_not_grantor": false, "required_tags": [] },
+    "task":         { "status": "active",            "subject": "agent_pubkey",       "grantee_not_grantor": false, "required_tags": [] },
+    "task+act":     { "status": "active",            "subject": "agent_pubkey",       "grantee_not_grantor": false, "required_tags": [] },
+    "task-relay":   { "status": "active",            "subject": "agent_pubkey",       "grantee_not_grantor": false, "required_tags": [] },
+    "shadow":       { "status": "active",            "subject": "grantor_pubkey",     "grantee_not_grantor": true,  "required_tags": [] },
+    "mirror":       { "status": "active",            "subject": "community_id",       "grantee_not_grantor": false, "required_tags": ["tos"] },
+    "mention":      { "status": "active",            "subject": "agent_pubkey",       "grantee_not_grantor": false, "required_tags": ["name"] },
+    "onboard":      { "status": "active",            "subject": "grantor_pubkey",     "grantee_not_grantor": true,  "required_tags": ["policy", "age"] },
+    "memory-write": { "status": "dormant",           "subject": "grantor_pubkey",     "grantee_not_grantor": false, "required_tags": [] }
+  }
+}
