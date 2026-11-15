@@ -21,21 +21,28 @@ The two never collide on the wire: a scoped-data `440` is never published unwrap
 wrapped. This profile keeps the deployed kinds rather than moving capability grants to new kinds, because every live
 grant, broker, console and consent record already uses them and a move gains nothing a reader can observe.
 
-### 1.1 Classification (MUST)
+### 1.1 Shape and classification
 
-A reader that handles either profile MUST classify each `440`/`441` before acting on it, and MUST NOT treat one
-profile as the other:
+**Issuers MUST** produce exactly this shape:
 
 | | Capability `440` | Capability `441` |
 |---|---|---|
 | Signed (`id` and valid BIP-340 `sig`) | required | required |
-| Seen bare on a relay (not inside a seal) | yes | yes |
-| `["a", "30440:..."]` | MUST be absent | MUST be absent |
+| Published bare on a relay (not inside a seal) | yes | yes |
+| `["a", "30440:..."]` | absent | absent |
 | `["da-cap", <cap>]` | exactly one | absent |
 | `["da-scope", <hash>, <salt>]` | exactly one | absent |
 | `["p", <grantee>]` | exactly one | optional (see §5) |
 | `["e", <440-id>]` | absent | exactly one |
 | `content` | `""` | `""` |
+
+**Readers** that handle either profile MUST NOT treat one profile as the other, and:
+
+- MUST confer nothing from a capability `440` that carries more than one `da-cap`, `da-scope` or `p` tag. Taking the
+  first match is not conforming: two readers can then disagree about what the same signed event grants (one picks the
+  first `da-cap`, another refuses the event). The same applies to more than one `e` on a capability `441`.
+- SHOULD NOT act on an event carrying `["a", "30440:..."]` as a capability (it is shaped as a scoped-data grant).
+- MAY ignore `content`; a non-empty `content` confers nothing extra.
 
 An event that matches neither profile's shape confers nothing.
 
@@ -166,6 +173,8 @@ the profile and the code can be reconciled, not to claim they already agree.
 
 | Rule | Deployed behavior that does not conform | Where |
 |---|---|---|
+| §1.1 single tags | Takes the **first** matching `p` / `da-cap` / `da-scope` tag instead of refusing an event with duplicates | `nvoy/mcp/tools/admission.mjs` (`tag()`, used by `foldGrantsWith` and `foldMemoryGrantsWith`), `nvoy/mcp/tools/onboard_delegate.mjs`, `nvoy/console/capgrants.mjs`, `waggle/src/bridge.mjs` (`processGrantEvent`), `waggle/src/consent.mjs`. `nave.pub/deploy/relay/write-policy.py` conforms (`only_tag`, one `da-scope`). |
+| §1.1 `a` tag | Does not check for `["a", "30440:..."]` before acting on a capability `440` | the same nvoy and waggle readers; `nvoy/console/capgrants.mjs` conforms (classifies an `a`-tagged `440` as a data grant) |
 | §5 ordering | **Backdated `441` leaves its `task`/`task+act`/`task-relay`/`shadow`/`mention` target live** (sorts by `created_at` and deletes only grants already seen). A revocation can silently fail to take. | `nvoy/mcp/tools/admission.mjs` `foldGrantsWith` |
 | §3 salt | Non-hex salt is silently truncated by `Buffer.from(…, 'hex')` instead of rejected | `nvoy/mcp/tools/grant_fold.mjs` |
 | §3 salt | Accepts `""` or any even-length hex salt | `waggle/src/scope_hash.mjs`, `waggle/console/scope-hash.mjs` |
