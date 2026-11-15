@@ -5,7 +5,7 @@
 // Verifies cryptographic event hashes, BIP-340 Schnorr signatures, da-scope
 // salted SHA-256 commitments (including the live relay vector), SPEC.md rumor
 // vs bare capability wire-profile disambiguation, all 10 da-cap shapes,
-// revocation semantics, and negative / cross-consumer divergence controls.
+// consumer-accurate revocation semantics, and negative / divergence controls.
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -36,11 +36,13 @@ const EXPECTED_CAPS = [
   'task+act',
   'task-relay',
   'shadow',
-  'mirror',
   'mention',
+  'mirror',
   'onboard',
   'memory-write',
 ]
+
+const NVOY_TASK_CAPS = new Set(['task', 'task+act', 'task-relay'])
 
 function strictDaScopeHash(subject, saltHex, domainLabel = 'waggle/da-scope/v1') {
   if (typeof saltHex !== 'string' || (!/^([0-9a-f]{2})+$/i.test(saltHex) && saltHex !== '')) {
@@ -54,6 +56,16 @@ function strictDaScopeHash(subject, saltHex, domainLabel = 'waggle/da-scope/v1')
     saltBytes,
   )
   return bytesToHex(sha256(preimage))
+}
+
+function scopeMatchesStrict(ev, subject) {
+  const t = ev.tags.find((row) => row[0] === 'da-scope')
+  if (!t || typeof t[1] !== 'string' || typeof t[2] !== 'string') return false
+  try {
+    return strictDaScopeHash(subject, t[2]) === t[1]
+  } catch {
+    return false
+  }
 }
 
 function relayPolicySaltValid(saltHex) {
@@ -109,6 +121,7 @@ function isExpiredStrictNip40(ev, nowSec) {
   return Number(exp) <= nowSec
 }
 
+// Models order-independent strict same-author folds (hive-list.mjs prefilter, capabilities.ts, capgrants.mjs, consent.mjs)
 function foldStrictSameAuthorOrderIndependent(grants, revocations, nowSec) {
   const grantsById = new Map(grants.map((g) => [g.id, g]))
   const revokedIds = new Set()
@@ -123,7 +136,11 @@ function foldStrictSameAuthorOrderIndependent(grants, revocations, nowSec) {
   return grants.filter((g) => verifySignedNostrEvent(g) && !revokedIds.has(g.id) && !isExpiredStrictNip40(g, nowSec))
 }
 
-function foldGrantorPoolTimestampSorted(grants, revocations, grantorsSet, nowSec) {
+// Faithfully models nvoy@516d12b0:mcp/tools/admission.mjs:65-88 (foldGrantsWith):
+// - grantor-pool revocation (any pubkey in grantorsSet)
+// - created_at ascending sort of 440 + 441 together
+// - accepts ONLY shadow (scoped to ev.pubkey), mention (scoped to agentPubkey), and TASK_CAPS (scoped to agentPubkey)
+function foldNvoyAdmissionGrantsWith(grants, revocations, grantorsSet, agentPubkey, nowSec) {
   const all = [...grants, ...revocations].sort((a, b) => a.created_at - b.created_at)
   const live = new Map()
   for (const ev of all) {
@@ -135,7 +152,88 @@ function foldGrantorPoolTimestampSorted(grants, revocations, grantorsSet, nowSec
       live.set(ev.id, ev)
     }
   }
-  return [...live.values()]
+  const accepted = []
+  for (const ev of live.values()) {
+    const grantee = tagValue(ev, 'p')
+    const cap = tagValue(ev, 'da-cap')
+    if (!grantee || !cap) continue
+    if (cap === 'shadow') {
+      if (grantee !== ev.pubkey && scopeMatchesStrict(ev, ev.pubkey)) accepted.push(ev)
+    } else if (cap === 'mention') {
+      const handle = tagValue(ev, 'name')
+      if (
+        grantee !== agentPubkey &&
+        typeof handle === 'string' &&
+        /^[a-z0-9][a-z0-9._-]{0,31}$/i.test(handle) &&
+        scopeMatchesStrict(ev, agentPubkey)
+      ) {
+        accepted.push(ev)
+      }
+    } else if (NVOY_TASK_CAPS.has(cap) && scopeMatchesStrict(ev, agentPubkey)) {
+      accepted.push(ev)
+    }
+  }
+  return accepted
+}
+
+// Models nvoy@516d12b0:mcp/tools/onboard_delegate.mjs:57-88 (foldOnboardGrants)
+function foldOnboardGrantsOrderIndependent(grants, revocations, ownerPubkey, nowSec) {
+  const revokedIds = new Set()
+  for (const r of revocations) {
+    if (r.kind !== 441 || r.pubkey !== ownerPubkey || !verifySignedNostrEvent(r)) continue
+    const targetId = tagValue(r, 'e')
+    if (targetId) revokedIds.add(targetId)
+  }
+  return grants.filter((ev) => {
+    if (ev.kind !== 440 || ev.pubkey !== ownerPubkey || !verifySignedNostrEvent(ev)) return false
+    if (revokedIds.has(ev.id) || isExpiredStrictNip40(ev, nowSec)) return false
+    const grantee = tagValue(ev, 'p')
+    const policy = tagValue(ev, 'policy')
+    return (
+      tagValue(ev, 'da-cap') === 'onboard' &&
+      Boolean(grantee) &&
+      grantee !== ownerPubkey &&
+      typeof policy === 'string' &&
+      policy.length > 0 &&
+      policy.length <= 128 &&
+      tagValue(ev, 'age') === 'confirmed' &&
+      scopeMatchesStrict(ev, ownerPubkey)
+    )
+  })
+}
+
+// Models waggle@ea0290cd:src/bridge.mjs:1192-1215 + src/consent.mjs:45-65 + nvoy@516d12b0:console/capgrants.mjs:24-45
+function waggleBridgeAccepts(ev, channelUuid) {
+  const cap = tagValue(ev, 'da-cap')
+  return verifySignedNostrEvent(ev) && (cap === 'admit' || cap === 'admit+read') && scopeMatchesStrict(ev, channelUuid)
+}
+
+function waggleConsentAccepts(ev, bridgePubkey, communityId, expectedTos) {
+  return (
+    verifySignedNostrEvent(ev) &&
+    tagValue(ev, 'da-cap') === 'mirror' &&
+    tagValue(ev, 'p') === bridgePubkey &&
+    scopeMatchesStrict(ev, communityId) &&
+    tagValue(ev, 'tos') === expectedTos
+  )
+}
+
+function classifyNvoyCapgrantsLedger(ev) {
+  const aTag = tagValue(ev, 'a')
+  if (aTag && /(^|:)30440:/.test(aTag)) return { type: 'data', label: 'Data delegation', cap: null }
+  const cap = tagValue(ev, 'da-cap')
+  if (cap !== undefined) {
+    const labels = {
+      admit: 'Channel admission',
+      'admit+read': 'Channel admission + read',
+      task: 'Tasking authority',
+      'task+act': 'Tasking + act',
+      'task-relay': 'Task relay carrier',
+    }
+    const c = cap || 'grant'
+    return { type: 'capability', label: labels[c] || `Capability: ${c}`, cap: c }
+  }
+  return null
 }
 
 console.log('1. Bundle hygiene & live relay da-scope reference vector')
@@ -251,20 +349,20 @@ for (const rev of bundle.capability_revocation_vectors) {
 
 const taskGrant = grantMap.get('cap-440-task')
 const sameAuthorRev = revMap.get('cap-441-revoke-task-same-author')
+const taskBackdatedRev = revMap.get('cap-441-revoke-task-backdated')
 const coGrantorRev = revMap.get('cap-441-revoke-task-co-grantor')
 const mirrorGrant = grantMap.get('cap-440-mirror')
 const mirrorRev = revMap.get('cap-441-revoke-mirror-with-bridge-p')
 const onboardGrant = grantMap.get('cap-440-onboard')
 const onboardBackdatedRev = revMap.get('cap-441-revoke-onboard-backdated')
-const grantorsPool = new Set([
-  bundle.identities.owner_grantor.pubkey,
-  bundle.identities.co_grantor.pubkey,
-])
+const agentPk = bundle.identities.agent_grantee.pubkey
+const ownerPk = bundle.identities.owner_grantor.pubkey
+const grantorsPool = new Set([ownerPk, bundle.identities.co_grantor.pubkey])
 
 check(
-  'same-author 441 revokes under both strict-same-author and grantor-pool folds',
+  'same-author 441 revokes cap-440-task in both order-independent and nvoy admission folds',
   foldStrictSameAuthorOrderIndependent([taskGrant], [sameAuthorRev], bundle.evaluation_now).length === 0 &&
-    foldGrantorPoolTimestampSorted([taskGrant], [sameAuthorRev], grantorsPool, bundle.evaluation_now).length === 0,
+    foldNvoyAdmissionGrantsWith([taskGrant], [sameAuthorRev], grantorsPool, agentPk, bundle.evaluation_now).length === 0,
 )
 check(
   'mirror 441 carries bridge p-tag for #p-filtered relay subscriptions and revokes mirror 440',
@@ -272,41 +370,69 @@ check(
     foldStrictSameAuthorOrderIndependent([mirrorGrant], [mirrorRev], bundle.evaluation_now).length === 0,
 )
 check(
-  'backdated 441 (created_at < 440) revokes in order-independent fold vs survives in timestamp-sorted fold',
-  onboardBackdatedRev.created_at < onboardGrant.created_at &&
-    foldStrictSameAuthorOrderIndependent([onboardGrant], [onboardBackdatedRev], bundle.evaluation_now).length === 0 &&
-    foldGrantorPoolTimestampSorted([onboardGrant], [onboardBackdatedRev], grantorsPool, bundle.evaluation_now).length === 1,
+  'backdated task 441 (created_at < cap-440-task) revokes in order-independent fold vs survives in nvoy admission foldGrantsWith',
+  taskBackdatedRev.created_at < taskGrant.created_at &&
+    foldStrictSameAuthorOrderIndependent([taskGrant], [taskBackdatedRev], bundle.evaluation_now).length === 0 &&
+    foldNvoyAdmissionGrantsWith([taskGrant], [taskBackdatedRev], grantorsPool, agentPk, bundle.evaluation_now).length === 1,
 )
 check(
-  'co-grantor 441 (pubkey != 440.pubkey) is ignored by strict-same-author fold vs revokes in grantor-pool fold',
+  'backdated onboard 441 revokes in onboard_delegate fold, while nvoy admission ignores onboard even unrevoked',
+  onboardBackdatedRev.created_at < onboardGrant.created_at &&
+    foldOnboardGrantsOrderIndependent([onboardGrant], [], ownerPk, bundle.evaluation_now).length === 1 &&
+    foldOnboardGrantsOrderIndependent([onboardGrant], [onboardBackdatedRev], ownerPk, bundle.evaluation_now).length === 0 &&
+    foldNvoyAdmissionGrantsWith([onboardGrant], [], grantorsPool, agentPk, bundle.evaluation_now).length === 0,
+)
+check(
+  'co-grantor 441 (pubkey != 440.pubkey) is ignored by strict-same-author fold vs revokes in nvoy admission grantor-pool fold',
   coGrantorRev.pubkey !== taskGrant.pubkey &&
     foldStrictSameAuthorOrderIndependent([taskGrant], [coGrantorRev], bundle.evaluation_now).length === 1 &&
-    foldGrantorPoolTimestampSorted([taskGrant], [coGrantorRev], grantorsPool, bundle.evaluation_now).length === 0,
+    foldNvoyAdmissionGrantsWith([taskGrant], [coGrantorRev], grantorsPool, agentPk, bundle.evaluation_now).length === 0,
 )
 
 console.log('\n5. Negative control vectors')
 const negMap = new Map(bundle.negative_vectors.map((v) => [v.id, v]))
+
+const negUnknownCap = negMap.get('neg-440-unknown-cap')
+const unknownLedgerRow = classifyNvoyCapgrantsLedger(negUnknownCap.event)
+check(
+  'neg-440-unknown-cap fails closed in all runtime authority folds while surfacing in generic audit ledger',
+  verifySignedNostrEvent(negUnknownCap.event) &&
+    !EXPECTED_CAPS.includes(tagValue(negUnknownCap.event, 'da-cap')) &&
+    !waggleBridgeAccepts(negUnknownCap.event, bundle.subjects.channel_uuid) &&
+    !waggleConsentAccepts(
+      negUnknownCap.event,
+      bundle.identities.bridge_carrier.pubkey,
+      bundle.subjects.hive_community_id,
+      bundle.subjects.mirror_tos_sha256,
+    ) &&
+    foldNvoyAdmissionGrantsWith([negUnknownCap.event], [], grantorsPool, agentPk, bundle.evaluation_now).length === 0 &&
+    foldOnboardGrantsOrderIndependent([negUnknownCap.event], [], ownerPk, bundle.evaluation_now).length === 0 &&
+    unknownLedgerRow?.type === 'capability' &&
+    unknownLedgerRow?.label === 'Capability: unknown-future-cap',
+)
 
 const negOutsider = negMap.get('neg-441-outsider-author')
 check(
   'neg-441-outsider-author has valid sig but fails to revoke in both strict and grantor-pool folds',
   verifySignedNostrEvent(negOutsider.event) &&
     foldStrictSameAuthorOrderIndependent([taskGrant], [negOutsider.event], bundle.evaluation_now).length === 1 &&
-    foldGrantorPoolTimestampSorted([taskGrant], [negOutsider.event], grantorsPool, bundle.evaluation_now).length === 1,
+    foldNvoyAdmissionGrantsWith([taskGrant], [negOutsider.event], grantorsPool, agentPk, bundle.evaluation_now).length === 1,
 )
 
 const negSelfShadow = negMap.get('neg-440-self-shadow')
 check(
-  'neg-440-self-shadow has valid sig & scope but fails self-delegation guard (p === pubkey)',
+  'neg-440-self-shadow has valid sig & scope but is rejected by nvoy admission self-delegation guard',
   verifySignedNostrEvent(negSelfShadow.event) &&
-    tagValue(negSelfShadow.event, 'p') === negSelfShadow.event.pubkey,
+    tagValue(negSelfShadow.event, 'p') === negSelfShadow.event.pubkey &&
+    foldNvoyAdmissionGrantsWith([negSelfShadow.event], [], grantorsPool, agentPk, bundle.evaluation_now).length === 0,
 )
 
 const negSelfOnboard = negMap.get('neg-440-self-onboard')
 check(
-  'neg-440-self-onboard has valid sig & scope but fails self-delegation guard (p === pubkey)',
+  'neg-440-self-onboard has valid sig & scope but is rejected by onboard_delegate self-delegation guard',
   verifySignedNostrEvent(negSelfOnboard.event) &&
-    tagValue(negSelfOnboard.event, 'p') === negSelfOnboard.event.pubkey,
+    tagValue(negSelfOnboard.event, 'p') === negSelfOnboard.event.pubkey &&
+    foldOnboardGrantsOrderIndependent([negSelfOnboard.event], [], ownerPk, bundle.evaluation_now).length === 0,
 )
 
 const negBadSalt = negMap.get('neg-440-bad-salt-nonhex')
@@ -333,8 +459,9 @@ check(
   verifySignedNostrEvent(negNpub.event) &&
     decodedNpub.type === 'npub' &&
     decodedNpub.data === negNpub.expected_normalized_subject &&
-    strictDaScopeHash(negNpub.expected_normalized_subject, npubScopeTag[2]) !== npubScopeTag[1] &&
-    strictDaScopeHash(negNpub.unnormalized_subject, npubScopeTag[2]) === npubScopeTag[1],
+    !scopeMatchesStrict(negNpub.event, negNpub.expected_normalized_subject) &&
+    strictDaScopeHash(negNpub.unnormalized_subject, npubScopeTag[2]) === npubScopeTag[1] &&
+    foldNvoyAdmissionGrantsWith([negNpub.event], [], grantorsPool, agentPk, bundle.evaluation_now).length === 0,
 )
 
 const negExpired = negMap.get('neg-440-expired')
@@ -342,7 +469,7 @@ check(
   'neg-440-expired has valid sig but is rejected at evaluation_now',
   verifySignedNostrEvent(negExpired.event) &&
     isExpiredStrictNip40(negExpired.event, bundle.evaluation_now) &&
-    foldStrictSameAuthorOrderIndependent([negExpired.event], [], bundle.evaluation_now).length === 0,
+    foldNvoyAdmissionGrantsWith([negExpired.event], [], grantorsPool, agentPk, bundle.evaluation_now).length === 0,
 )
 
 const negMalformedExp = negMap.get('neg-440-malformed-expiration')
@@ -350,14 +477,15 @@ check(
   'neg-440-malformed-expiration has valid sig and fails closed under strict NIP-40 expiration check',
   verifySignedNostrEvent(negMalformedExp.event) &&
     isExpiredStrictNip40(negMalformedExp.event, bundle.evaluation_now) &&
-    foldStrictSameAuthorOrderIndependent([negMalformedExp.event], [], bundle.evaluation_now).length === 0,
+    foldNvoyAdmissionGrantsWith([negMalformedExp.event], [], grantorsPool, agentPk, bundle.evaluation_now).length === 0,
 )
 
 const negTampered = negMap.get('neg-440-tampered-sig')
 check(
   'neg-440-tampered-sig keeps matching event id hash but fails BIP-340 Schnorr signature verification',
   getEventHash(negTampered.event) === negTampered.event.id &&
-    !verifySignedNostrEvent(negTampered.event),
+    !verifySignedNostrEvent(negTampered.event) &&
+    foldNvoyAdmissionGrantsWith([negTampered.event], [], grantorsPool, agentPk, bundle.evaluation_now).length === 0,
 )
 
 console.log(`\n${passed} passed, ${failed} failed`)

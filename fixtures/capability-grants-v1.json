@@ -1,6 +1,6 @@
 {
   "schema_version": "capability-grants-fixtures/v1",
-  "description": "Frozen kind:440 / kind:441 test-vector corpus for q-076 (C7 input): contrasts SPEC.md NIP-59 scoped-data rumors against deployed bare-signed capability grants, freezes the live relay da-scope vector, covers all 10 da-cap values in code, and provides positive revocations plus negative / cross-consumer divergence controls.",
+  "description": "Frozen kind:440 / kind:441 test-vector corpus for q-076 (C7 input): contrasts SPEC.md NIP-59 scoped-data rumors against deployed bare-signed capability grants, freezes the live relay da-scope vector, covers all 10 da-cap values in code, and provides positive revocations plus negative / cross-consumer divergence controls (including unknown da-cap and backdated task 441).",
   "evaluation_now": 1794700500,
   "audited_commits": {
     "nostr-scoped-data-grants": "4f14f439b7b8b41f2c3a8b6f998e6791eb217f8c",
@@ -19,7 +19,8 @@
       ],
       "signed_inner_event": false,
       "transport": "NIP-59 kind:13 seal + kind:1059 gift wrap",
-      "scope_binding": "[\"a\", \"30440:<publisher-pubkey>:<d-tag>\", \"<relay-hint>\"] + [\"v\", \"<generation>\"]",
+      "classifier_440": "Unsigned rumor (no id/sig), carries [\"a\", \"30440:<publisher-pubkey>:<d-tag>\", \"<relay-hint>\"] + [\"v\", \"<generation>\"] + optional [\"expiration\", \"<ts>\"], lacks da-cap/da-scope",
+      "classifier_441": "Unsigned rumor (no id/sig), carries [\"a\", \"30440:<publisher-pubkey>:<d-tag>\"], lacks e/da-cap/da-scope",
       "revocation_mechanism": "Rotate symmetric scope_key and publish v+1 on kind:30440 (kind:441 rumor is optional courtesy notice)"
     },
     "capability_public_event": {
@@ -30,8 +31,9 @@
       ],
       "signed_inner_event": true,
       "transport": "Bare BIP-340 Schnorr-signed Nostr events on grant relays",
-      "scope_binding": "[\"p\", \"<64-hex-grantee>\"] + [\"da-scope\", \"<64-hex-sha256>\", \"<salt-hex>\"] + [\"da-cap\", \"<capability>\"]",
-      "revocation_mechanism": "Bare BIP-340 signed kind:441 event carrying [\"e\", \"<440-event-id>\"] (and optional [\"p\", \"<bridge-pubkey>\"] for #p-filtered mirror subscriptions)"
+      "classifier_440": "Signed event (id + sig), lacks [\"a\", \"30440:...\"], carries [\"p\", \"<64-hex-grantee>\"] + [\"da-scope\", \"<64-hex-sha256>\", \"<salt-hex>\"] + [\"da-cap\", \"<capability>\"] + optional [\"expiration\", \"<ts>\"]",
+      "classifier_441": "Signed event (id + sig), lacks [\"a\", \"30440:...\"], carries [\"e\", \"<440-event-id>\"] (with [\"p\", \"<bridge-pubkey>\"] added only on mint-consent.mjs mirror revocations)",
+      "revocation_mechanism": "Bare BIP-340 signed kind:441 event carrying [\"e\", \"<440-event-id>\"]"
     }
   },
   "da_scope_spec": {
@@ -551,7 +553,7 @@
         "grantor_pool_consumers": "revokes",
         "timestamp_sorted_consumers": "revokes"
       },
-      "notes": "Canonical same-author kind:441 revocation (441.pubkey === 440.pubkey, 441.created_at > 440.created_at). Revokes across all consumers.",
+      "notes": "Canonical same-author kind:441 revocation (441.pubkey === 440.pubkey, 441.created_at > 440.created_at). Revokes across all task/ledger consumers.",
       "event": {
         "id": "1c10727042580692d45d70f19f60b94cbaae21052ebd2bd4d66f012038557366",
         "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
@@ -598,16 +600,42 @@
       }
     },
     {
+      "id": "cap-441-revoke-task-backdated",
+      "wire_profile": "capability_public_event",
+      "revokes_vector_id": "cap-440-task",
+      "target_grant_id": "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6",
+      "issuer_role": "owner_grantor",
+      "expected_behavior": {
+        "order_independent_task_and_ledger_consumers": "revokes",
+        "nvoy_admission_foldGrantsWith_timestamp_sorted": "does_not_revoke_newer_task_440"
+      },
+      "notes": "Backdated same-author 441 targeting supported task grant cap-440-task (441.created_at < 440.created_at). Directly exercises Divergence #3: nvoy/mcp/tools/admission.mjs:foldGrantsWith accepts cap-440-task into TASK_CAPS and leaves it live because the 441 sorts before the 440, whereas order-independent consumers (waggle/console/hive-list.mjs, nvoy/mcp/src/capabilities.ts, nvoy/console/capgrants.mjs) drop cap-440-task.",
+      "event": {
+        "id": "8d080d5a01c9981eec2c828cf755f1c3b1a699e2855be51fb3de6d5c8d1437df",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700025,
+        "kind": 441,
+        "tags": [
+          [
+            "e",
+            "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6"
+          ]
+        ],
+        "content": "",
+        "sig": "cbe2130f7b6804c4b5ea6414e01aa7ade233d82521b64675f7375c86028aad929b4c59471230ab70566b3a799ec0d55f435a2024030e796dae730f7db9eb22b6"
+      }
+    },
+    {
       "id": "cap-441-revoke-onboard-backdated",
       "wire_profile": "capability_public_event",
       "revokes_vector_id": "cap-440-onboard",
       "target_grant_id": "2f90787377e1e15d82eff35ea6671d1f8e17c7fa2aeab4abd74b2dadad1b3509",
       "issuer_role": "owner_grantor",
       "expected_behavior": {
-        "order_independent_consumers": "revokes",
-        "admission_foldGrantsWith_timestamp_sorted": "does_not_revoke_newer_440"
+        "onboard_consumers_order_independent": "revokes",
+        "nvoy_admission_foldGrantsWith": "ignores_onboard_cap_regardless"
       },
-      "notes": "Backdated same-author 441 (441.created_at < 440.created_at). Revokes in onboard_delegate.mjs, write-policy.py, bridge.mjs, consent.mjs, hive-list.mjs, and foldMemoryGrantsWith; exposes timestamp-ordering divergence vs admission.mjs:foldGrantsWith.",
+      "notes": "Backdated same-author 441 targeting cap-440-onboard (441.created_at < 440.created_at). Confirms order-independent revocation in onboard_delegate.mjs and nave.pub write-policy.py (note: admission.mjs:foldGrantsWith ignores da-cap=\"onboard\" regardless of revocation).",
       "event": {
         "id": "de960acc7d95929a4a414e3e4de24cfb647228a363e38d846279318791211618",
         "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
@@ -633,7 +661,7 @@
         "strict_same_author_consumers": "ignored_not_grant_author",
         "grantor_pool_consumers": "revokes_when_co_grantor_in_grantors"
       },
-      "notes": "Co-grantor 441 (441.pubkey !== 440.pubkey, but co_grantor is in manifest.grantors). Exposes revocation-authority divergence: bridge.mjs and admission.mjs:foldGrantsWith revoke; hive-list.mjs, hive-change.mjs, onboard_delegate.mjs, capabilities.ts, and write-policy.py ignore.",
+      "notes": "Co-grantor 441 (441.pubkey !== 440.pubkey, but co_grantor is in manifest.grantors). Exposes Divergence #2: bridge.mjs and admission.mjs:foldGrantsWith revoke; hive-list.mjs, hive-change.mjs, onboard_delegate.mjs, capabilities.ts, and write-policy.py ignore.",
       "event": {
         "id": "417fb67c0236268f874dfedcab7ad0fb24641b83f6411e4fb06ab73190c6fd47",
         "pubkey": "aa64052cdfa03d315e9067748392251ec781528dd9b58b868c480efe3a0bef8a",
@@ -651,6 +679,48 @@
     }
   ],
   "negative_vectors": [
+    {
+      "id": "neg-440-unknown-cap",
+      "failure_code": "unknown_da_cap",
+      "description": "Valid BIP-340 signature and da-scope commitment, but da-cap=\"unknown-future-cap\" is outside all 10 defined capability values. Runtime authority enforcers fail closed (ignore/reject), issuance/request helpers reject, while generic audit/ledger/inspection surfaces display and allow revoking it.",
+      "signature_valid": true,
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "consumer_disposition": {
+        "waggle_bridge_processGrantEvent": "ignore_no_authority",
+        "waggle_consent_verifyConsent": "reject_not_a_mirror_capability",
+        "nvoy_admission_foldGrantsWith": "ignore_no_authority",
+        "nvoy_admission_foldMemoryGrantsWith": "ignore_no_authority",
+        "nvoy_onboard_foldOnboardGrants": "ignore_no_authority",
+        "nave_pub_write_policy_onboard_check": "ignore_no_onboard_authority",
+        "waggle_grant_cli_and_join_request_and_nact_buildGrantEvents": "reject_at_issuance",
+        "nvoy_console_capgrants_classifyGrant": "display_capability_fallback_label_and_allow_441_revoke",
+        "nvoy_mcp_readHeldCapabilities": "display_raw_da_cap_label",
+        "nact_actionRows_and_nave_cap_badge": "display_raw_da_cap_label"
+      },
+      "event": {
+        "id": "3bbc96a44c7d74fea16c55387df1e6d9b0c471c7269bd85dc1e6f0f7bb4c2eed",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700295,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "302e82a1384cbf8b002023273438125837685bd91957d040e338914569cb0e1f",
+            "c9f628ae7ce6188be810e7d8e6c7d716"
+          ],
+          [
+            "da-cap",
+            "unknown-future-cap"
+          ]
+        ],
+        "content": "",
+        "sig": "95b3d7fb8420be2198b7f087185c1aed49693b8045ff9e31bc5d293fd9b4a88dd676935a27f661c4760964e687bfa7ce5ccc6e885b208e6fbe9f59a6cd6abd0d"
+      }
+    },
     {
       "id": "neg-441-outsider-author",
       "failure_code": "wrong_revocation_author",

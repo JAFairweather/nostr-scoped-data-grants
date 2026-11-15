@@ -16,17 +16,18 @@
 
 ## 1. Two Wire Profiles Sharing Event Kinds `440` and `441`
 
-In the current codebase, event numbers `440` and `441` appear in two distinct wire profiles that share zero tags beyond standard Nostr envelope fields:
+In the current codebase, event numbers `440` and `441` appear in two distinct wire profiles. Both `kind:440` profiles permit an optional NIP-40 `["expiration", "<unix-sec>"]` tag, but they share zero scope-binding, capability, or revocation target tags:
 
 | Property | Profile A: Scoped Data Grant ([`SPEC.md`](SPEC.md)) | Profile B: Deployed Capability Grant (`waggle` / `nvoy` / `nave.pub` / `nact`) |
 | --- | --- | --- |
 | **Purpose** | Deliver a symmetric 32-byte NIP-44 `scope_key` decrypting an addressable `kind:30440` Scoped Data Set | Publicly attest or revoke a scoped authority or data-subject consent without key material |
 | **Inner signature** | **Unsigned rumor** (`no id`, `no sig`; [`SPEC.md:107-115`](SPEC.md#L107-L115), [`SPEC.md:147`](SPEC.md#L147)) | **Bare BIP-340 Schnorr-signed Nostr event** (`id` + 64-byte `sig`) |
 | **Transport** | NIP-59 `kind:13` seal + `kind:1059` gift wrap (never published bare on a relay) | Published directly to grant relays (`wss://relay.nave.pub`, `wss://relay.ditto.pub`, `wss://relay.primal.net`, `wss://nos.lol` per `nvoy/mcp/tools/grant_relays.mjs:3-8`) |
-| **`kind:440` tags** | `["a", "30440:<pub>:<d>", "<relay-hint>"]`, `["v", "<gen>"]`, optional `["expiration", "<ts>"]` | `["p", "<64-hex-grantee>"]`, `["da-scope", "<64-hex-hash>", "<salt-hex>"]`, `["da-cap", "<cap>"]`, plus cap-specific tags |
+| **`kind:440` tags** | `["a", "30440:<pub>:<d>", "<relay-hint>"]`, `["v", "<gen>"]`, optional `["expiration", "<ts>"]` | `["p", "<64-hex-grantee>"]`, `["da-scope", "<64-hex-hash>", "<salt-hex>"]`, `["da-cap", "<cap>"]`, optional `["expiration", "<ts>"]`, plus cap-specific tags |
 | **`kind:440` `content`** | JSON `{"scope_key":"<base64>","scope_name":"..."}` | Empty string `""` |
 | **`kind:441` revocation** | Optional courtesy rumor (`["a", "30440:<pub>:<d>"]`); real revocation is key rotation (`v+1` on `30440`) | Authoritative signed revocation carrying `["e", "<64-hex-440-id>"]` (plus `["p", "<bridge-pubkey>"]` on `mint-consent.mjs` mirror revocations) |
-| **Classifier boundary** | Has `["a", "30440:..."]`, lacks `da-cap` / `da-scope` | Lacks `["a", "30440:..."]`, carries `p` + `da-scope` + `da-cap` (`nvoy/console/capgrants.mjs:59-72`, `nvoy/mcp/src/capabilities.ts:81-94`) |
+| **`kind:440` classifier boundary** | Unsigned (`no id`, `no sig`), has `["a", "30440:..."]` + `["v", "<gen>"]`, lacks `da-cap` / `da-scope` | Signed (`id` + `sig`), lacks `["a", "30440:..."]`, carries `p` + `da-scope` + `da-cap` (`nvoy/console/capgrants.mjs:24-45`, `nvoy/mcp/src/capabilities.ts:85-89`) |
+| **`kind:441` classifier boundary** | Unsigned (`no id`, `no sig`), has `["a", "30440:..."]`, lacks `e` | Signed (`id` + `sig`), lacks `["a", "30440:..."]`, carries `["e", "<64-hex-440-id>"]` (`p` is absent except on `mint-consent.mjs` `mirror` revocations for `#p`-filtered relay subscriptions) |
 
 > **Related non-grant carrier:** `waggle/src/join_request.mjs:17,23,49` also uses `["da-cap", "<cap>"]` inside ephemeral **kind `27493`** join-request events (`REQUESTABLE_CAPS = ['admit', 'task', 'task+act', 'task-relay']`). Kind `27493` is an unprivileged request, never an active grant.
 
@@ -114,7 +115,7 @@ Across all five repositories, exactly **10** `da-cap` string values appear in co
 | `mcp/tools/onboard_delegate.mjs:47-100` -> `nvoy-onboard.mjs:72`, `onboard_request.mjs:115-128` | Onboarding consumer | `onboard` | `foldOnboardGrants` / `readOnboardGrants`: enforces `p !== owner`, `scopeMatches(owner)`, non-empty `policy <= 128`, `age === "confirmed"`, NIP-40 `expiration`, and `441.pubkey === owner` |
 | `mcp/tools/nvoy-status.mjs:72-95` | CLI diagnostics | Any `da-cap` on `#p = agent` | Summarizes live vs revoked (`441`) grants targeting an agent |
 | `mcp/src/capabilities.ts:22-171` (`app.ts:220`) | MCP consumer | Generic (labels 6 caps, passes through unknown `da-cap`) | `readHeldCapabilities`: lists capabilities where user is grantee (`#p`) or issuer (`authors`), folding `441` where `441.pubkey === 440.pubkey` |
-| `console/capgrants.mjs:24-125` (`ledger.mjs`, `scope-facet.mjs`, `grantee-kind.mjs`) | Console ledger consumer & revoker | Generic (`classifyGrant` accepts any non-`30440` `440` with `p` + `da-cap` + `da-scope`) | Displays issued capability grants and publishes `kind:441` revocations (`buildExternalRevocation`) |
+| `console/capgrants.mjs:24-125` (`ledger.mjs`, `scope-facet.mjs`, `grantee-kind.mjs`) | Console ledger consumer & revoker | Generic (`classifyGrant` accepts any non-`30440` `440` with `da-cap`) | Displays issued capability grants and publishes `kind:441` revocations (`buildExternalRevocation`) |
 | `console/task-authority-lib.mjs:22-51` | Browser issuer / revoker | `task`, `task+act`, `task-relay` | `buildGrantTemplate` & `buildRevokeTemplate` |
 | `console/consent-request.mjs:53-65` & `consent-publish.mjs:12-20` | Browser issuer | `mirror` | Parses mirror consent deep-links and signs/publishes `kind:440` with `tos` |
 | `lib/nave-cap.mjs:20-52` | UI badge component | `mirror`, `admit`, `admit+read`, `task-relay`, `task`, `task+act`, `shadow` | `<nave-cap>` custom element |
@@ -138,23 +139,37 @@ Across all five repositories, exactly **10** `da-cap` string values appear in co
 
 Every divergence below has a corresponding frozen test vector in [`fixtures/capability-grants-v1.json`](fixtures/capability-grants-v1.json):
 
-1. **Vocabulary / Registry Drift Across 5 Copies**
-   - `nave.pub/components/nave-cap.mjs:18` & `nact/lib/actions.mjs:24`: 6 caps (`admit`, `admit+read`, `task`, `task+act`, `task-relay`, `mirror`).
-   - `nvoy/lib/nave-cap.mjs:20`: 7 caps (adds `shadow`).
-   - `waggle/console/capability-vocabulary.mjs:52-60`: 8 caps (adds `mention`; lacks `onboard` and `memory-write`).
-   - `nvoy/mcp/src/capabilities.ts:22-29` (6 human labels) and `nvoy/console/capgrants.mjs:43` (5 human labels) fall back to raw `da-cap` strings for newer caps (`mention`, `onboard`, `shadow`).
-   - **C7 question:** Establish one canonical capability registry and clarify the disposition of `admit+read` and `memory-write`.
+1. **Vocabulary / Registry Drift & Unknown-`da-cap` Disposition (`neg-440-unknown-cap`)**
+   - **Registry drift across 5 copies:**
+     - `nave.pub/components/nave-cap.mjs:18` & `nact/lib/actions.mjs:24`: 6 caps (`admit`, `admit+read`, `task`, `task+act`, `task-relay`, `mirror`).
+     - `nvoy/lib/nave-cap.mjs:20`: 7 caps (adds `shadow`).
+     - `waggle/console/capability-vocabulary.mjs:52-60`: 8 caps (adds `mention`; lacks `onboard` and `memory-write`).
+     - `nvoy/mcp/src/capabilities.ts:22-29` (6 human labels) and `nvoy/console/capgrants.mjs:43` (5 human labels) fall back to raw `da-cap` strings for newer caps (`mention`, `onboard`, `shadow`).
+   - **Per-consumer disposition on an unknown `da-cap` (`neg-440-unknown-cap`, `da-cap = "unknown-future-cap"`):**
+
+     | Consumer Surface | Disposition on Unknown `da-cap` | Exact Source Citation |
+     | --- | --- | --- |
+     | `waggle` bridge room admission | **Ignore** (zero room/return-lane authority) | `waggle/src/bridge.mjs:1199` (`cap !== 'admit' && cap !== 'admit+read'`) |
+     | `waggle` mirror consent verifier | **Reject** (`{ ok: false, reason: 'not a mirror capability' }`) | `waggle/src/consent.mjs:46` |
+     | `nvoy` broker task/mention/shadow fold | **Ignore** (zero `senders`, `relays`, `mentions`, or `grants` entries) | `nvoy/mcp/tools/admission.mjs:76-85` (`foldGrantsWith`) |
+     | `nvoy` memory grant fold | **Ignore** (zero writer authority) | `nvoy/mcp/tools/admission.mjs:150-156` (`foldMemoryGrantsWith`) |
+     | `nvoy` onboarding delegate fold & `nave.pub` relay policy | **Ignore** for onboarding authority (`cap !== 'onboard'`) | `nvoy/mcp/tools/onboard_delegate.mjs:67`, `nave.pub/deploy/relay/write-policy.py:265` |
+     | `waggle` CLI / join-request & `nact` proposal builders | **Reject** at construction; console marks `known: false, requestable: false` | `waggle/tools/grant.mjs:175`, `src/join_request.mjs:23`, `console/capability-vocabulary.mjs:160-175`, `nact/lib/actions.mjs:113` |
+     | `nvoy` console universal ledger (`capgrants.mjs`) | **Display & allow `441` revocation** (`type: 'capability'`, `label: "Capability: <cap>"`) so delegators never lose visibility/revoke control over grants issued by newer apps | `nvoy/console/capgrants.mjs:21-45,98-106` |
+     | `nvoy` MCP `readHeldCapabilities`, `nvoy-status`, `nact` `actionRows`, `<nave-cap>` | **Display** with raw `da-cap` fallback label (confers zero runtime authority) | `nvoy/mcp/src/capabilities.ts:85-89,105`, `mcp/tools/nvoy-status.mjs:80`, `nact/lib/actions.mjs:142-158`, `nvoy/lib/nave-cap.mjs:39` |
+
+   - **C7 question:** Establish one canonical capability registry, preserve the intentional split between fail-closed runtime authority enforcers and app-agnostic audit/revocation ledgers, and settle the disposition of `admit+read` and `memory-write`.
 
 2. **Revocation Signer Rule: Strict Same-Author (`441.pubkey === 440.pubkey`) vs Grantor-Pool (`441.pubkey in grantors`)**
-   - *Vector:* `cap-441-revoke-task-co-grantor` (plus negative control `neg-441-outsider-author`).
+   - *Vectors:* `cap-441-revoke-task-co-grantor` (plus negative control `neg-441-outsider-author`).
    - **Grantor-pool revokers:** `waggle/src/bridge.mjs:1151-1180` (`admit`) and `nvoy/mcp/tools/admission.mjs:68-72` (`foldGrantsWith` for `task`/`task+act`/`task-relay`/`shadow`/`mention`) allow *any* pubkey in `grantors` to revoke a `440` authored by *another* grantor in the same pool.
    - **Strict same-author revokers:** `waggle/console/hive-list.mjs:43,49`, `waggle/console/hive-change.mjs:186`, `waggle/src/consent.mjs:96`, `nvoy/mcp/tools/onboard_delegate.mjs:59,71`, `nvoy/mcp/src/capabilities.ts:127`, and `nave.pub/deploy/relay/write-policy.py:275` require `441.pubkey === 440.pubkey`. Because `waggle/console/hive-list.mjs` pre-filters revocations by `r.pubkey === g.pubkey` before calling `nvoy-admission`, the Waggle console UI can display a co-grantor-revoked grant as still active while the nvoy broker treats it as revoked.
 
 3. **Backdated Revocation Ordering (`441.created_at < 440.created_at`)**
-   - *Vector:* `cap-441-revoke-onboard-backdated`.
+   - *Vectors:* `cap-441-revoke-task-backdated` (primary cross-consumer divergence control on `cap-440-task`) and `cap-441-revoke-onboard-backdated` (order-independent `onboard` control).
    - Because `kind:441` references a specific `kind:440` event ID (`["e", <440-id>]`) — which commits to `440.created_at` inside the SHA-256 preimage — a `441` cannot exist before its target `440` was constructed, even under clock skew.
-   - **Order-independent consumers** (`waggle/src/bridge.mjs:1139-1153,1203`, `waggle/src/consent.mjs:82-97`, `waggle/console/hive-list.mjs:43-49`, `nvoy/mcp/tools/onboard_delegate.mjs:10-11,57-75`, `nvoy/mcp/tools/admission.mjs:142-169` `foldMemoryGrantsWith`, `nvoy/mcp/src/capabilities.ts:122-135`, `nave.pub/deploy/relay/write-policy.py:270-278`) collect all valid `441` target IDs first and drop matching `440`s regardless of `created_at`.
-   - **Timestamp-sorted consumer:** `nvoy/mcp/tools/admission.mjs:67,72` (`foldGrantsWith`) sorts `440` and `441` events together by `created_at` ascending and deletes from `live` when visiting a `441`; if `441.created_at < 440.created_at`, the `441` runs before the `440` is inserted and fails to revoke it.
+   - **Timestamp-sorted consumer (`nvoy/mcp/tools/admission.mjs:67-85` `foldGrantsWith`):** accepts `cap-440-task` (`da-cap = "task"` in `TASK_CAPS`), sorts `440` and `441` events together by `created_at` ascending, and deletes from `live` when visiting a `441`. On `cap-441-revoke-task-backdated` (`441.created_at < 440.created_at`), `foldGrantsWith` processes the `441` before `cap-440-task` is inserted and **leaves `cap-440-task` live** in `senders`/`grants`.
+   - **Order-independent consumers** (`waggle/src/bridge.mjs:1139-1153,1203`, `waggle/src/consent.mjs:82-97`, `waggle/console/hive-list.mjs:43-49`, `nvoy/mcp/tools/onboard_delegate.mjs:10-11,57-75`, `nvoy/mcp/tools/admission.mjs:142-169` `foldMemoryGrantsWith`, `nvoy/mcp/src/capabilities.ts:122-135`, `nvoy/console/capgrants.mjs:93-97`, `nave.pub/deploy/relay/write-policy.py:270-278`) collect all valid `441` target IDs first and **drop matching `440`s regardless of `created_at`** (exercised for `task` by `cap-441-revoke-task-backdated` and for `onboard` by `cap-441-revoke-onboard-backdated`; note that `admission.mjs:foldGrantsWith` ignores `onboard` regardless of `441`).
 
 4. **NIP-40 `expiration` Tag Enforcement & Malformed Values**
    - *Vectors:* `cap-440-task-act-expiring`, `neg-440-expired`, `neg-440-malformed-expiration`.
@@ -183,5 +198,5 @@ npm run smoke:fixtures
 - **Live relay `da-scope` reference vector:** `01a41ce2...` -> `b6c00312...`.
 - **2 [`SPEC.md`](SPEC.md) unsigned rumor vectors:** `440` Data Grant rumor and `441` courtesy revocation rumor (`scoped_data_rumor` profile).
 - **10 BIP-340 signed `kind:440` capability grant vectors:** one for every `da-cap` value in code (`admit`, `admit+read`, `task`, `task+act`, `task-relay`, `shadow`, `mirror`, `mention`, `onboard`, `memory-write`), independently checking `getEventHash`, `@noble/curves/secp256k1` `schnorr.verify`, `nostr-tools` `verifyEvent`, `da-scope` preimage recomputation, and per-capability tag invariants.
-- **4 BIP-340 signed `kind:441` capability revocation vectors:** standard same-author revocation, `mirror` revocation with bridge `p` tag, backdated `441` (`created_at < 440.created_at`), and co-grantor `441` (`pubkey !== 440.pubkey`).
-- **8 negative control vectors:** outsider `441`, self-`shadow`, self-`onboard`, non-hex salt (`Buffer.from` truncation control), unnormalized `npub1...` subject, expired NIP-40 `440`, malformed NIP-40 `expiration`, and tampered BIP-340 signature.
+- **5 BIP-340 signed `kind:441` capability revocation vectors:** standard same-author `task` revocation, `mirror` revocation with bridge `p` tag, backdated `task` `441` (`created_at < 440.created_at`, proving the `admission.mjs:foldGrantsWith` vs order-independent consumer divergence on a supported task grant), backdated `onboard` `441` (order-independent `onboard` revocation), and co-grantor `task` `441` (`pubkey !== 440.pubkey`).
+- **9 negative control vectors:** unknown `da-cap` (`neg-440-unknown-cap`, proving fail-closed runtime rejection vs generic ledger display), outsider `441`, self-`shadow`, self-`onboard`, non-hex salt (`Buffer.from` truncation control), unnormalized `npub1...` subject, expired NIP-40 `440`, malformed NIP-40 `expiration`, and tampered BIP-340 signature.
