@@ -36,11 +36,18 @@ who granted access to whom.
 ```
 npm install
 npm run demo          # narrated protocol walkthrough (in-memory relay)
+npm run demo:e2-grant # E2 draft: verify PR 20/21 fixture, then issue and attenuate a v2 data grant locally
 npm run smoke:local   # 11 assertions, in-memory
 npm run smoke         # same 11 assertions against real public relays
 npm run interop       # 5 JS↔Go cross-implementation assertions (needs Go)
 npm run seed          # throwaway demo graph on live relays → prints a login key
 ```
+
+The E2 grant demo checks the PR 20/21 **bare, signed capability `440`** fixture,
+then runs the separate experimental **wrapped data grant `442`** lifecycle from
+[`SPEC-v2.md`](SPEC-v2.md). Its onward attenuation gives the recipient only one
+field key; it does not attenuate a `da-cap` or implement C7's proposed v3
+request caveats. The demo uses an in-memory relay and prints no key material.
 
 ## Go CLI key input
 

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "demo": "node demo.mjs",
+    "demo:e2-grant": "node e2-grant-demo.mjs",
     "smoke": "node smoke.mjs",
     "smoke:local": "node smoke.mjs --local",
     "smoke:v2": "node smoke-v2.mjs --local",
