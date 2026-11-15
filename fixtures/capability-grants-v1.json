@@ -1067,6 +1067,95 @@
         "sig": "b832d2d1267a250e3a0707272435394d068bf7f28585aaece8e6fe1ef5294257625174b628970587f3cc98d1d3c66269b1ad424d1b3982328c16d02fe0679a14"
       },
       "reader_disposition": "revoke_every_named_target"
+    },
+    {
+      "id": "neg-440-missing-p",
+      "failure_code": "missing_required_p",
+      "description": "Valid owner-grantor signature but no p tag. CAPABILITY-GRANTS.md §1.1: a reader MUST confer nothing.",
+      "signature_valid": true,
+      "event": {
+        "kind": 440,
+        "created_at": 1794700381,
+        "content": "",
+        "tags": [
+          [
+            "da-scope",
+            "d43f691126f3fef406a2c2c983063157cf86d63c0ddd0ed7408bc333d2ad6c4a",
+            "dba51ace9b5fde28cf61cf66d8f12d14"
+          ],
+          [
+            "da-cap",
+            "task"
+          ]
+        ],
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "id": "2115a9f79e0adc08f5f7e75a44a99aa722b4c0ccb5cac35e4a0d5d5c57fae1de",
+        "sig": "b41610f9ded16ae7360fd0a5d07993bfcc7db86bf64230b80534c701ae8ccae6c894ecd9ecdd8a2b7508c3dddf00e8718c008414e765a75cc176b59ad1f7cdae"
+      }
+    },
+    {
+      "id": "neg-440-missing-da-cap",
+      "failure_code": "missing_required_da_cap",
+      "description": "Valid owner-grantor signature but no da-cap tag. CAPABILITY-GRANTS.md §1.1: a reader MUST confer nothing.",
+      "signature_valid": true,
+      "event": {
+        "kind": 440,
+        "created_at": 1794700382,
+        "content": "",
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "d43f691126f3fef406a2c2c983063157cf86d63c0ddd0ed7408bc333d2ad6c4a",
+            "dba51ace9b5fde28cf61cf66d8f12d14"
+          ]
+        ],
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "id": "c42eb90b1a3d098e8e539125d74cf004d33861fc6c9c6e118254fd613ef2a9ae",
+        "sig": "aa07bf2e0aa2d57c042b4635d6caec71e12b6e64139e7643871168d041f999246dfb0c458d2c78244ff17def8db7dc3310d2e5cbaca90df59d68ddb7768b2507"
+      }
+    },
+    {
+      "id": "neg-440-missing-da-scope",
+      "failure_code": "missing_required_da_scope",
+      "description": "Valid owner-grantor signature but no da-scope tag. CAPABILITY-GRANTS.md §1.1: a reader MUST confer nothing.",
+      "signature_valid": true,
+      "event": {
+        "kind": 440,
+        "created_at": 1794700383,
+        "content": "",
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-cap",
+            "task"
+          ]
+        ],
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "id": "98cc59aab904868a0158fbf9f306958d6e58ba90b2b8f8ab97343497795de6c5",
+        "sig": "3efefda204c8e40ca232b11d38b655874a90a084fba9c5a102b603c030654ee1563d38160d8bdf7dc580969d7f36ad1743c9c50bf9b900d4f36aaa595114ceb8"
+      }
+    },
+    {
+      "id": "neg-441-missing-e",
+      "failure_code": "missing_required_e",
+      "description": "Valid owner-grantor signature but no e tag. CAPABILITY-GRANTS.md §1.1: a reader MUST confer nothing and revoke nothing.",
+      "signature_valid": true,
+      "event": {
+        "kind": 441,
+        "created_at": 1794700384,
+        "content": "",
+        "tags": [],
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "id": "d5ff17788916984b3e613ac4f4a62ee2fb9e8cab41b84ae3561397bd4ea10dbe",
+        "sig": "d6bde0adedd8d3c442e33730f29f90217167385c88cbd80a79d91a67f3530d41b4ed47b938d4919e9ff6e3cd24c763856bcfa350733561e86538e9b32d3c5aaf"
+      }
     }
   ]
 }

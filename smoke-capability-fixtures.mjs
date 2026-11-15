@@ -514,6 +514,21 @@ for (const v of [negDupCap, negDupP]) {
     verifySignedNostrEvent(v.event) && v.event.pubkey === ownerPk && !readerMinimumAccepts(v.event),
   )
 }
+for (const [id, absentTag] of [
+  ['neg-440-missing-p', 'p'],
+  ['neg-440-missing-da-cap', 'da-cap'],
+  ['neg-440-missing-da-scope', 'da-scope'],
+  ['neg-441-missing-e', 'e'],
+]) {
+  const v = negMap.get(id)
+  const required = v?.event.kind === 440 ? ['p', 'da-cap', 'da-scope'] : ['e']
+  check(
+    `${id} is signed by the owner, lacks only ${absentTag}, and confers nothing`,
+    v?.signature_valid === true && verifySignedNostrEvent(v.event) && v.event.pubkey === ownerPk &&
+      required.every((name) => tagCount(v.event, name) === (name === absentTag ? 0 : 1)) &&
+      !readerMinimumAccepts(v.event),
+  )
+}
 check(
   'neg-440-duplicate-da-cap: first-match and last-match readers disagree (task vs task+act); the deployed first-match fold confers task',
   tagValue(negDupCap.event, 'da-cap') === 'task' &&
