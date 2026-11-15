@@ -50,8 +50,9 @@ Beyond that minimum, a reader:
 - SHOULD NOT act on an event carrying `["a", "30440:..."]` as a capability (it is shaped as a scoped-data grant);
 - MAY ignore `content`; a non-empty `content` confers nothing extra.
 
-So an event can break the issuer shape and still be read: a `440` with non-empty `content` grants what its single tags
-say, and a `441` with two `e` tags revokes both. An event that fails the minimum classifier confers nothing.
+So an event can break the issuer shape and still be read: a `440` with non-empty `content` *may* be read, and then only
+its single tags confer authority (a reader may instead reject the malformed issuer shape); a `441` with two `e` tags
+revokes both. An event that fails the minimum classifier confers nothing.
 
 ## 2. Capability `440`
 
@@ -166,7 +167,7 @@ Each reader MUST above has a frozen vector in [`fixtures/capability-grants-v1.js
 | Rule | Vectors |
 |---|---|
 | §1.1 classification | `scoped_data_rumor_vectors`, all `cap-440-*`, all `cap-441-*` |
-| §1.1 minimum classifier | `neg-440-duplicate-da-cap`, `neg-440-duplicate-p` (refused); `neg-441-multi-e` (revokes both targets) |
+| §1.1 minimum classifier | `neg-440-duplicate-da-cap`, `neg-440-duplicate-p`, `neg-440-missing-p`, `neg-440-missing-da-cap`, `neg-440-missing-da-scope`, `neg-441-missing-e` (refused); `neg-441-multi-e` (revokes both targets) |
 | §3 salt and subject | `neg-440-bad-salt-nonhex`, `neg-440-npub-unnormalized-subject`, the live `da-scope` reference |
 | §4 registry and cap tags | one `cap-440-*` per registered cap; `neg-440-self-shadow`, `neg-440-self-onboard` |
 | §4.1 unknown cap | `neg-440-unknown-cap` |
