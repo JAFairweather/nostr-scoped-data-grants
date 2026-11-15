@@ -970,6 +970,103 @@
         "content": "",
         "sig": "0a1e831b5b5cfbdd198bc8ae5967961c84842439feaf074c23468385005f46b234e2bdcca5923c52ed8b5f039ceb2324155a4b06b119796eb451d7d42b051a4b"
       }
+    },
+    {
+      "id": "neg-440-duplicate-da-cap",
+      "failure_code": "duplicate_single_tag",
+      "description": "Valid BIP-340 signature and da-scope for agent_grantee, but two da-cap tags (task, task+act). CAPABILITY-GRANTS.md §1.1: a reader MUST confer nothing; a first-match reader would confer task, a last-match reader task+act.",
+      "signature_valid": true,
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "event": {
+        "kind": 440,
+        "created_at": 1794700370,
+        "content": "",
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "d43f691126f3fef406a2c2c983063157cf86d63c0ddd0ed7408bc333d2ad6c4a",
+            "dba51ace9b5fde28cf61cf66d8f12d14"
+          ],
+          [
+            "da-cap",
+            "task"
+          ],
+          [
+            "da-cap",
+            "task+act"
+          ]
+        ],
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "id": "5ab30333ad8903b9d5b068a1a757e87ca9ea91bcb6eff2d20c2133effe344ae1",
+        "sig": "260d80d2858c88e55155324199de331980e7cb6af1f36369d9c0f823d685a0b9a6a6ce8f5a5a8e6ac1c55c0ac800bf91bab03728f915da41c008f3b4dbb7ef2b"
+      }
+    },
+    {
+      "id": "neg-440-duplicate-p",
+      "failure_code": "duplicate_single_tag",
+      "description": "Valid signature and da-scope, da-cap task, but two p tags (sender_operator, outsider). §1.1: a reader MUST confer nothing to either grantee.",
+      "signature_valid": true,
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "event": {
+        "kind": 440,
+        "created_at": 1794700375,
+        "content": "",
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "p",
+            "513a5e3bcca083afa5c81d23258941621bf25e9feac34e761a3e749a44976281"
+          ],
+          [
+            "da-scope",
+            "d43f691126f3fef406a2c2c983063157cf86d63c0ddd0ed7408bc333d2ad6c4a",
+            "dba51ace9b5fde28cf61cf66d8f12d14"
+          ],
+          [
+            "da-cap",
+            "task"
+          ]
+        ],
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "id": "11e5ee4486d9b02685c36fee6b72dd21ede192e85cfff3ea9fd8c1f833a014a8",
+        "sig": "62e84ef6401d9103d18fa5db0d377413e93a0ffbcb724f19921f20ec320b7f353904b0eab985258a5f874323989928f9ba5b2665dda52a6184bf3b67cee755ce"
+      }
+    },
+    {
+      "id": "neg-441-multi-e",
+      "failure_code": "issuer_shape_multi_e",
+      "description": "Valid signature from the grantor of both targets, but two e tags (cap-440-task, cap-440-admit). CAPABILITY-GRANTS.md §1.1: issuers MUST NOT produce it; a reader MUST revoke every named target its author may revoke (§5), never only the first. A first-match reader revokes only cap-440-task and leaves cap-440-admit live.",
+      "signature_valid": true,
+      "target_grant_ids": [
+        "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6",
+        "0dad7022bc7979a4b6ee3db85e5d8a63d5c48f0cd812c0c35cd9dd1170caea67"
+      ],
+      "event": {
+        "kind": 441,
+        "created_at": 1794700380,
+        "content": "",
+        "tags": [
+          [
+            "e",
+            "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6"
+          ],
+          [
+            "e",
+            "0dad7022bc7979a4b6ee3db85e5d8a63d5c48f0cd812c0c35cd9dd1170caea67"
+          ]
+        ],
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "id": "5a17f55425ee1f390ebfcf2e330c5f0d02a7df9c7815a36f3c826eaa71c68177",
+        "sig": "b832d2d1267a250e3a0707272435394d068bf7f28585aaece8e6fe1ef5294257625174b628970587f3cc98d1d3c66269b1ad424d1b3982328c16d02fe0679a14"
+      },
+      "reader_disposition": "revoke_every_named_target"
     }
   ]
 }
