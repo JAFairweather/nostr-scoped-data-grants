@@ -100,6 +100,17 @@ function tagValue(ev, name) {
   return t ? t[1] : undefined
 }
 
+// CAPABILITY-GRANTS.md §1.1 minimum reader classifier: the MUST rules only. A 440 needs exactly one of each single
+// tag (refusing is fail-closed); a 441 needs at least one e and revokes every target it names (also fail-closed).
+function tagCount(ev, name) {
+  return ev.tags.filter((row) => row[0] === name).length
+}
+function readerMinimumAccepts(ev) {
+  if (ev.kind === 440) return ['p', 'da-cap', 'da-scope'].every((n) => tagCount(ev, n) === 1)
+  if (ev.kind === 441) return tagCount(ev, 'e') >= 1
+  return false
+}
+
 function classifyWireProfile(ev) {
   const aTag = tagValue(ev, 'a')
   if (typeof aTag === 'string' && aTag.startsWith('30440:') && ev.id === undefined && ev.sig === undefined) {
@@ -486,6 +497,62 @@ check(
   getEventHash(negTampered.event) === negTampered.event.id &&
     !verifySignedNostrEvent(negTampered.event) &&
     foldNvoyAdmissionGrantsWith([negTampered.event], [], grantorsPool, agentPk, bundle.evaluation_now).length === 0,
+)
+
+console.log('\n6. Duplicate single tags (CAPABILITY-GRANTS.md §1.1 reader MUST)')
+const negDupCap = negMap.get('neg-440-duplicate-da-cap')
+const negDupP = negMap.get('neg-440-duplicate-p')
+const negMultiE = negMap.get('neg-441-multi-e')
+const admitGrant = bundle.capability_grant_vectors.find((v) => v.id === 'cap-440-admit').event
+check(
+  'every positive capability 440/441 vector passes the minimum reader classifier',
+  [...bundle.capability_grant_vectors, ...bundle.capability_revocation_vectors].every((v) => readerMinimumAccepts(v.event)),
+)
+for (const v of [negDupCap, negDupP]) {
+  check(
+    `${v.id} is signed by the owner grantor, valid, and refused by the minimum reader classifier`,
+    verifySignedNostrEvent(v.event) && v.event.pubkey === ownerPk && !readerMinimumAccepts(v.event),
+  )
+}
+for (const [id, absentTag] of [
+  ['neg-440-missing-p', 'p'],
+  ['neg-440-missing-da-cap', 'da-cap'],
+  ['neg-440-missing-da-scope', 'da-scope'],
+  ['neg-441-missing-e', 'e'],
+]) {
+  const v = negMap.get(id)
+  const required = v?.event.kind === 440 ? ['p', 'da-cap', 'da-scope'] : ['e']
+  check(
+    `${id} is signed by the owner, lacks only ${absentTag}, and confers nothing`,
+    v?.signature_valid === true && verifySignedNostrEvent(v.event) && v.event.pubkey === ownerPk &&
+      required.every((name) => tagCount(v.event, name) === (name === absentTag ? 0 : 1)) &&
+      !readerMinimumAccepts(v.event),
+  )
+}
+check(
+  'neg-440-duplicate-da-cap: first-match and last-match readers disagree (task vs task+act); the deployed first-match fold confers task',
+  tagValue(negDupCap.event, 'da-cap') === 'task' &&
+    negDupCap.event.tags.filter((t) => t[0] === 'da-cap').at(-1)[1] === 'task+act' &&
+    foldNvoyAdmissionGrantsWith([negDupCap.event], [], grantorsPool, agentPk, bundle.evaluation_now).length === 1,
+)
+check(
+  'neg-440-duplicate-p: the deployed first-match fold confers to the first p only',
+  tagValue(negDupP.event, 'p') === bundle.identities.sender_operator.pubkey &&
+    foldNvoyAdmissionGrantsWith([negDupP.event], [], grantorsPool, agentPk, bundle.evaluation_now).length === 1,
+)
+const revokesEveryTarget = (grants, rev) =>
+  grants.filter((g) => !(rev.pubkey === g.pubkey && rev.tags.some((t) => t[0] === 'e' && t[1] === g.id)))
+check(
+  'neg-441-multi-e is signed by the grantor of both targets and passes the reader classifier (a 441 is not refused)',
+  verifySignedNostrEvent(negMultiE.event) && negMultiE.event.pubkey === ownerPk && readerMinimumAccepts(negMultiE.event) &&
+    admitGrant.pubkey === ownerPk && taskGrant.pubkey === ownerPk,
+)
+check(
+  'neg-441-multi-e: a conforming reader revokes both named targets; the deployed first-match fold revokes only the first',
+  JSON.stringify(negMultiE.target_grant_ids) === JSON.stringify([taskGrant.id, admitGrant.id]) &&
+    negMultiE.event.tags.filter((t) => t[0] === 'e').map((t) => t[1]).join() === negMultiE.target_grant_ids.join() &&
+    revokesEveryTarget([taskGrant, admitGrant], negMultiE.event).length === 0 &&
+    tagValue(negMultiE.event, 'e') === taskGrant.id,
 )
 
 console.log(`\n${passed} passed, ${failed} failed`)

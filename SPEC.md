@@ -35,6 +35,10 @@ This NIP builds on [NIP-44](44.md) (encrypted payloads) and [NIP-59](59.md) (gif
 
 Kind numbers are placeholders pending assignment.
 
+Kinds `440` and `441` also carry a second, signed wire profile, **capability grants**, which attest a scoped authority
+and carry no key material. Readers MUST classify each `440`/`441` before acting on it; see
+[`CAPABILITY-GRANTS.md`](CAPABILITY-GRANTS.md) §1.1. A Data Grant as defined here is never published unwrapped.
+
 ## Scoped Data Set (`kind:30440`)
 
 An addressable event holding one scope's data as ciphertext. The `d` tag identifies the scope.
