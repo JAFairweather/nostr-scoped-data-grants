@@ -1,0 +1,905 @@
+{
+  "schema_version": "capability-grants-fixtures/v1",
+  "description": "Frozen kind:440 / kind:441 test-vector corpus for q-076 (C7 input): contrasts SPEC.md NIP-59 scoped-data rumors against deployed bare-signed capability grants, freezes the live relay da-scope vector, covers all 10 da-cap values in code, and provides positive revocations plus negative / cross-consumer divergence controls.",
+  "evaluation_now": 1794700500,
+  "audited_commits": {
+    "nostr-scoped-data-grants": "4f14f439b7b8b41f2c3a8b6f998e6791eb217f8c",
+    "waggle": "ea0290cd0357a5dff939ab9746eda751c580ef0e",
+    "waggle_pr_746_head": "c4ae443122183a93ca5917e3250c87406c769d07",
+    "nvoy": "516d12b0a30369aa0eab43172e29620a3320f302",
+    "nave.pub": "1217c4e81612ab7870dce33e6b73c488f23841ef",
+    "nact": "292155009611139fe0bdd3efe7e27c0c0690a642"
+  },
+  "wire_profiles": {
+    "scoped_data_rumor": {
+      "defined_in": "SPEC.md#data-grant-kind-440",
+      "kinds": [
+        440,
+        441
+      ],
+      "signed_inner_event": false,
+      "transport": "NIP-59 kind:13 seal + kind:1059 gift wrap",
+      "scope_binding": "[\"a\", \"30440:<publisher-pubkey>:<d-tag>\", \"<relay-hint>\"] + [\"v\", \"<generation>\"]",
+      "revocation_mechanism": "Rotate symmetric scope_key and publish v+1 on kind:30440 (kind:441 rumor is optional courtesy notice)"
+    },
+    "capability_public_event": {
+      "defined_in": "CAPABILITY-GRANTS-INVENTORY.md (deployed across waggle, nvoy, nave.pub, nact; normative C7 spec owned by waggle-dev)",
+      "kinds": [
+        440,
+        441
+      ],
+      "signed_inner_event": true,
+      "transport": "Bare BIP-340 Schnorr-signed Nostr events on grant relays",
+      "scope_binding": "[\"p\", \"<64-hex-grantee>\"] + [\"da-scope\", \"<64-hex-sha256>\", \"<salt-hex>\"] + [\"da-cap\", \"<capability>\"]",
+      "revocation_mechanism": "Bare BIP-340 signed kind:441 event carrying [\"e\", \"<440-event-id>\"] (and optional [\"p\", \"<bridge-pubkey>\"] for #p-filtered mirror subscriptions)"
+    }
+  },
+  "da_scope_spec": {
+    "domain_label": "waggle/da-scope/v1",
+    "separator_byte_hex": "00",
+    "formula": "sha256(utf8(\"waggle/da-scope/v1\") || 0x00 || utf8(normalized_subject) || hex_decode(salt_hex))",
+    "recommended_salt_bytes": 16,
+    "live_relay_reference_vector": {
+      "grant_event_id": "01a41ce2d42a0a7c22e70342ea93bc5693180bfe11ec275c235afd0a3e13d80d",
+      "subject": "ebc6eec1a7c36304c8093d2f60337045b60678e858fe3997eb9740215bfdd2f3",
+      "salt_hex": "5463a4e15781cbc705aedafa0423b08d",
+      "expected_hash": "b6c00312269a4dab018e32de4102ffcdb57434d18c88d84619fd1030ee809911",
+      "source": "waggle@ea0290cd0357a5dff939ab9746eda751c580ef0e:tests/scope_hash.mjs#L65-L75"
+    }
+  },
+  "identities": {
+    "owner_grantor": {
+      "role": "owner_grantor",
+      "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+      "description": "Primary hive owner, agent grantor, and memory owner",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:owner_grantor\"))"
+    },
+    "co_grantor": {
+      "role": "co_grantor",
+      "pubkey": "aa64052cdfa03d315e9067748392251ec781528dd9b58b868c480efe3a0bef8a",
+      "description": "Secondary grantor in manifest.grantors pool",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:co_grantor\"))"
+    },
+    "outsider": {
+      "role": "outsider",
+      "pubkey": "513a5e3bcca083afa5c81d23258941621bf25e9feac34e761a3e749a44976281",
+      "description": "Unrelated Nostr key outside grantors and non-author of any 440",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:outsider\"))"
+    },
+    "agent_grantee": {
+      "role": "agent_grantee",
+      "pubkey": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "description": "Target AI agent / nvoy broker subject (ME)",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:agent_grantee\"))"
+    },
+    "sender_operator": {
+      "role": "sender_operator",
+      "pubkey": "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e",
+      "description": "Authorized task sender / channel participant",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:sender_operator\"))"
+    },
+    "bridge_carrier": {
+      "role": "bridge_carrier",
+      "pubkey": "f0ef9db944ba5f5efda4f3ac9880f75fe3a4cd68bc3568958894ca2a75395f5f",
+      "description": "Waggle room bridge pubkey (carries task-relay and receives mirror consent)",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:bridge_carrier\"))"
+    },
+    "shadow_voice": {
+      "role": "shadow_voice",
+      "pubkey": "9e17aa1fdc6009573cef6586c72a0a7b3b9950ffc7b4a232c2abd358daa95298",
+      "description": "Voice / client key delegated via shadow by owner_grantor",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:shadow_voice\"))"
+    },
+    "mirror_subject": {
+      "role": "mirror_subject",
+      "pubkey": "5b733da2c2a3fb8c26bf061a377cbbd0aa05dbc3047fdfedff7e6c4d624866d6",
+      "description": "External Nostr participant granting/revoking mirror consent",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:mirror_subject\"))"
+    },
+    "mention_peer": {
+      "role": "mention_peer",
+      "pubkey": "037356b0c68c278af89ec043c05f29e77526473b9819e2b3144f0b72460939d1",
+      "description": "Peer key made mentionable on agent_grantee via mention grant",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:mention_peer\"))"
+    },
+    "onboard_delegate": {
+      "role": "onboard_delegate",
+      "pubkey": "2270f82f88cb10a1bedc29e9d86830193c3917f8b21b3737cf6fd99c1458cc57",
+      "description": "Delegate key authorized via onboard by owner_grantor",
+      "derivation_note": "x-only pubkey of sha256(utf8(\"nipda-capability-fixture-key/v1:onboard_delegate\"))"
+    }
+  },
+  "subjects": {
+    "channel_uuid": "a8186b53-537d-46ad-a7e7-b6486c58970e",
+    "hive_community_id": "waggle-hive-demo-v1",
+    "mirror_tos_sha256": "99f7def5dacc35d16217ef079911e101ca19c601658cde264ca2bc7fb28c38a6",
+    "scoped_data_d_tag": "4f9b2e7c11a08d3c",
+    "scoped_data_key_b64": "FC4OO+/Q8To3rRrUVveWTtSDjJnQJJ6vbbYOMw38uRc="
+  },
+  "scoped_data_rumor_vectors": [
+    {
+      "id": "rumor-440-scoped-data-grant",
+      "wire_profile": "scoped_data_rumor",
+      "description": "SPEC.md kind:440 Data Grant unsigned rumor (delivered inside NIP-59 kind:13 seal + kind:1059 gift wrap; carries symmetric scope_key and 30440 coordinate, never bare on a relay).",
+      "rumor": {
+        "kind": 440,
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700000,
+        "tags": [
+          [
+            "a",
+            "30440:808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6:4f9b2e7c11a08d3c",
+            "wss://relay.example.com"
+          ],
+          [
+            "v",
+            "1"
+          ]
+        ],
+        "content": "{\"scope_key\":\"FC4OO+/Q8To3rRrUVveWTtSDjJnQJJ6vbbYOMw38uRc=\",\"scope_name\":\"Work Contacts\"}"
+      }
+    },
+    {
+      "id": "rumor-441-scoped-data-revocation",
+      "wire_profile": "scoped_data_rumor",
+      "description": "SPEC.md kind:441 optional courtesy revocation unsigned rumor (delivered inside NIP-59 wrap; actual cryptographic revocation is v+1 key rotation on kind:30440).",
+      "rumor": {
+        "kind": 441,
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700060,
+        "tags": [
+          [
+            "a",
+            "30440:808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6:4f9b2e7c11a08d3c"
+          ]
+        ],
+        "content": ""
+      }
+    }
+  ],
+  "capability_grant_vectors": [
+    {
+      "id": "cap-440-admit",
+      "wire_profile": "capability_public_event",
+      "da_cap": "admit",
+      "issuer_role": "owner_grantor",
+      "grantee_role": "sender_operator",
+      "subject_kind": "channel_uuid",
+      "subject_preimage": "a8186b53-537d-46ad-a7e7-b6486c58970e",
+      "salt_hex": "c9a7e6a3c0ba6592ba2ca619f487b849",
+      "expected_da_scope": "732e63fd6bcf2b371e17cfb2ccb3ab35dca182a6105459e395be20eb7e58de5a",
+      "issuance_status": "active",
+      "notes": "Channel admission pass: seats p in channel roster and opens Waggle bridge return lane.",
+      "event": {
+        "id": "0dad7022bc7979a4b6ee3db85e5d8a63d5c48f0cd812c0c35cd9dd1170caea67",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700010,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "732e63fd6bcf2b371e17cfb2ccb3ab35dca182a6105459e395be20eb7e58de5a",
+            "c9a7e6a3c0ba6592ba2ca619f487b849"
+          ],
+          [
+            "da-cap",
+            "admit"
+          ]
+        ],
+        "content": "",
+        "sig": "03a910bfb5cc08cdb8ec5f4d287a642fed6b89e908bbd03fbd8f34840df5cb5712a1efd566dc7d5ade04d24a94a351af1695156c95e5419f453577ede280d9ad"
+      }
+    },
+    {
+      "id": "cap-440-admit-read",
+      "wire_profile": "capability_public_event",
+      "da_cap": "admit+read",
+      "issuer_role": "owner_grantor",
+      "grantee_role": "sender_operator",
+      "subject_kind": "channel_uuid",
+      "subject_preimage": "a8186b53-537d-46ad-a7e7-b6486c58970e",
+      "salt_hex": "42ae82d80d230d7f979090ca679821b3",
+      "expected_da_scope": "3ae0cb20f0848ef21a8955e474b9e1d56cdaf4c57f8d143ccbe1f0e76d802e8c",
+      "issuance_status": "disabled_at_issuance_accepted_by_bridge",
+      "notes": "Accepted alongside admit in waggle/src/bridge.mjs, but disabled in console/CLI pending Concord room-key / NIP-42 relay membership.",
+      "event": {
+        "id": "df01c8826f1beb7f2ac632eb42bc32d981282679b3b993ba57b938ea68151e64",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700020,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "3ae0cb20f0848ef21a8955e474b9e1d56cdaf4c57f8d143ccbe1f0e76d802e8c",
+            "42ae82d80d230d7f979090ca679821b3"
+          ],
+          [
+            "da-cap",
+            "admit+read"
+          ]
+        ],
+        "content": "",
+        "sig": "17f818a462af57a02b016f1a00007fd473b6d2707f40437afb36276434c5101d050ec6cb4eba2ff0c1ee5e5610cbaacff04cd3b0bbb6a7b3f6470933b34f62c9"
+      }
+    },
+    {
+      "id": "cap-440-task",
+      "wire_profile": "capability_public_event",
+      "da_cap": "task",
+      "issuer_role": "owner_grantor",
+      "grantee_role": "sender_operator",
+      "subject_kind": "agent_pubkey_hex",
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "salt_hex": "dba51ace9b5fde28cf61cf66d8f12d14",
+      "expected_da_scope": "d43f691126f3fef406a2c2c983063157cf86d63c0ddd0ed7408bc333d2ad6c4a",
+      "issuance_status": "active",
+      "notes": "Direct task authority: authorizes sender_operator (p) to wake and instruct agent_grantee (subject).",
+      "event": {
+        "id": "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700030,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "d43f691126f3fef406a2c2c983063157cf86d63c0ddd0ed7408bc333d2ad6c4a",
+            "dba51ace9b5fde28cf61cf66d8f12d14"
+          ],
+          [
+            "da-cap",
+            "task"
+          ]
+        ],
+        "content": "",
+        "sig": "3008b14b4e041aeba2e56c12aec6193a1836180b4b59d0af62430ed9944152e5c14806f2b2869697107bdc765cf9ea1cb582ca0b9960c793c9fcdef46ff62aea"
+      }
+    },
+    {
+      "id": "cap-440-task-act-expiring",
+      "wire_profile": "capability_public_event",
+      "da_cap": "task+act",
+      "issuer_role": "owner_grantor",
+      "grantee_role": "sender_operator",
+      "subject_kind": "agent_pubkey_hex",
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "salt_hex": "e94fbf519872fc700fc024973249c081",
+      "expected_da_scope": "a81dd3bc547fbc61013e7c0fb7c6cd36d16b141f2610be5aba76d871d694ec29",
+      "issuance_status": "active",
+      "notes": "Direct task + action-proposal authority with valid future NIP-40 expiration timestamp.",
+      "event": {
+        "id": "07788d8f6e3f0a2d6fdc60e69315fa4d3417277475a877ac842f59a8e649d903",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700040,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "a81dd3bc547fbc61013e7c0fb7c6cd36d16b141f2610be5aba76d871d694ec29",
+            "e94fbf519872fc700fc024973249c081"
+          ],
+          [
+            "da-cap",
+            "task+act"
+          ],
+          [
+            "expiration",
+            "1893456000"
+          ]
+        ],
+        "content": "",
+        "sig": "360cf010a431e94fabe436ac3a6208d686fb5ff8db8b7be71c474edd81696d87f3e9423fb4899ae4cb5dd58288367838cde3c2348eb665869334d9a6f899725f"
+      }
+    },
+    {
+      "id": "cap-440-task-relay",
+      "wire_profile": "capability_public_event",
+      "da_cap": "task-relay",
+      "issuer_role": "owner_grantor",
+      "grantee_role": "bridge_carrier",
+      "subject_kind": "agent_pubkey_hex",
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "salt_hex": "9da0d9a1307901bceab19ad42eecd818",
+      "expected_da_scope": "6bb714ef1dc05ce1d5fd5d6db5f40baf728cd6c2b484ba493c5c6065d88d224c",
+      "issuance_status": "active",
+      "notes": "Channel carrier authority: authorizes bridge_carrier (p) to relay room mentions to agent_grantee (never grants direct native DM authority).",
+      "event": {
+        "id": "ff384212a7945011c9b13b92998a7203aa4f832934db0b38964702f254bff5cd",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700050,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "f0ef9db944ba5f5efda4f3ac9880f75fe3a4cd68bc3568958894ca2a75395f5f"
+          ],
+          [
+            "da-scope",
+            "6bb714ef1dc05ce1d5fd5d6db5f40baf728cd6c2b484ba493c5c6065d88d224c",
+            "9da0d9a1307901bceab19ad42eecd818"
+          ],
+          [
+            "da-cap",
+            "task-relay"
+          ]
+        ],
+        "content": "",
+        "sig": "adf6b0f13c58eac503ea12fe9b4b2baade75d8aa1506633b15ad8bb78654e003814c4a67ccd3b250bfc71c45d04c981acd1e2aaa8c1921ff93920260ca29568d"
+      }
+    },
+    {
+      "id": "cap-440-shadow",
+      "wire_profile": "capability_public_event",
+      "da_cap": "shadow",
+      "issuer_role": "owner_grantor",
+      "grantee_role": "shadow_voice",
+      "subject_kind": "grantor_self_pubkey_hex",
+      "subject_preimage": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+      "salt_hex": "5b31f3909c5bad519b569810b3b56759",
+      "expected_da_scope": "8c56c6bbe5f55ebbc16592dd2ff8e80b039a786a26655331f73d4d3b1be66c6d",
+      "issuance_status": "active",
+      "notes": "Voice delegation: shadow_voice (p != pubkey) inherits owner_grantor live task/task+act authority on brokers and write authority in foldMemoryGrantsWith (non-transitive).",
+      "event": {
+        "id": "d66fa442802481ba27d792ad9a649db4df24bd2b53eabb32ff34168bf0a75795",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700060,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "9e17aa1fdc6009573cef6586c72a0a7b3b9950ffc7b4a232c2abd358daa95298"
+          ],
+          [
+            "da-scope",
+            "8c56c6bbe5f55ebbc16592dd2ff8e80b039a786a26655331f73d4d3b1be66c6d",
+            "5b31f3909c5bad519b569810b3b56759"
+          ],
+          [
+            "da-cap",
+            "shadow"
+          ]
+        ],
+        "content": "",
+        "sig": "c39ce02cc6c96c17362d6e5e9870acb9f2fd82d4f6906d82fabd40f1a0e770b19a804bb8fb833c5945ceb4b10db8818b9f6dfc0fc9358dce090133edcfdcd3f1"
+      }
+    },
+    {
+      "id": "cap-440-mirror",
+      "wire_profile": "capability_public_event",
+      "da_cap": "mirror",
+      "issuer_role": "mirror_subject",
+      "grantee_role": "bridge_carrier",
+      "subject_kind": "community_id",
+      "subject_preimage": "waggle-hive-demo-v1",
+      "salt_hex": "686d46c6f6905d361fb1cccabc32f304",
+      "expected_da_scope": "1d992488912118e722b266ac8e554aa0d2cd32bd1e1ed2a491c4a50d3f26c4c0",
+      "issuance_status": "active",
+      "notes": "Data-subject egress consent: signed by external participant (mirror_subject) to bridge_carrier with ToS SHA-256.",
+      "event": {
+        "id": "e4503cbd3bd7c99e94d7cbb089ceed069738d9976bac09b0350065c34957dc8c",
+        "pubkey": "5b733da2c2a3fb8c26bf061a377cbbd0aa05dbc3047fdfedff7e6c4d624866d6",
+        "created_at": 1794700070,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "f0ef9db944ba5f5efda4f3ac9880f75fe3a4cd68bc3568958894ca2a75395f5f"
+          ],
+          [
+            "da-scope",
+            "1d992488912118e722b266ac8e554aa0d2cd32bd1e1ed2a491c4a50d3f26c4c0",
+            "686d46c6f6905d361fb1cccabc32f304"
+          ],
+          [
+            "da-cap",
+            "mirror"
+          ],
+          [
+            "tos",
+            "99f7def5dacc35d16217ef079911e101ca19c601658cde264ca2bc7fb28c38a6"
+          ]
+        ],
+        "content": "",
+        "sig": "1665ae0aaad28562c77dedf5cec15863ea9014704cd112b19e33adb505608f50d4e8adc67fc109f24f994a818e7e3606de7a2a9a48a7128789136760ec3d2220"
+      }
+    },
+    {
+      "id": "cap-440-mention",
+      "wire_profile": "capability_public_event",
+      "da_cap": "mention",
+      "issuer_role": "owner_grantor",
+      "grantee_role": "mention_peer",
+      "subject_kind": "agent_pubkey_hex",
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "salt_hex": "ab26bba9230007a93b5b0b9239adc302",
+      "expected_da_scope": "26253590383bddc5e8f0f89876b311c670bd947d29078266c5baf1a77c32b6ba",
+      "issuance_status": "active",
+      "notes": "Outbound mention directory entry: binds @dennis to mention_peer (p != agent_grantee) on agent_grantee.",
+      "event": {
+        "id": "304ddef7b4668fa0e8e1bfbf5899bb4e1ca8be83794653b9c99e06a76bdf949e",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700080,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "037356b0c68c278af89ec043c05f29e77526473b9819e2b3144f0b72460939d1"
+          ],
+          [
+            "da-scope",
+            "26253590383bddc5e8f0f89876b311c670bd947d29078266c5baf1a77c32b6ba",
+            "ab26bba9230007a93b5b0b9239adc302"
+          ],
+          [
+            "da-cap",
+            "mention"
+          ],
+          [
+            "name",
+            "dennis"
+          ]
+        ],
+        "content": "",
+        "sig": "c18d53fa43dfa3d45dff8b2c140a58f7002559f18930e81f0671833c7137d5495bee3d2e7431235819efc6ce9eabddf4999c1a552e53fd4447cc509610bf3f0d"
+      }
+    },
+    {
+      "id": "cap-440-onboard",
+      "wire_profile": "capability_public_event",
+      "da_cap": "onboard",
+      "issuer_role": "owner_grantor",
+      "grantee_role": "onboard_delegate",
+      "subject_kind": "owner_self_pubkey_hex",
+      "subject_preimage": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+      "salt_hex": "4f8dc9de33ce1108c0efda9ba26e6588",
+      "expected_da_scope": "58fb18a2933d3ed04431dd0ba5b7993ef75068a3e8f8b3724e017822a21e7239",
+      "issuance_status": "active",
+      "notes": "Onboarding delegation: authorizes onboard_delegate (p != owner) to publish kind:30078 seat setup requests and pass strfry write-policy.",
+      "event": {
+        "id": "2f90787377e1e15d82eff35ea6671d1f8e17c7fa2aeab4abd74b2dadad1b3509",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700090,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "2270f82f88cb10a1bedc29e9d86830193c3917f8b21b3737cf6fd99c1458cc57"
+          ],
+          [
+            "da-scope",
+            "58fb18a2933d3ed04431dd0ba5b7993ef75068a3e8f8b3724e017822a21e7239",
+            "4f8dc9de33ce1108c0efda9ba26e6588"
+          ],
+          [
+            "da-cap",
+            "onboard"
+          ],
+          [
+            "policy",
+            "nave-terms-2026-11"
+          ],
+          [
+            "age",
+            "confirmed"
+          ]
+        ],
+        "content": "",
+        "sig": "7b16d979befb6bb9f782d2b1fa42e18384da90b2b1d923794ebc0b68309ef6d2f2e240787cc2c7e46962895c8fee906b485c3a2f8a793f1d5c3f0dfea7a66ea5"
+      }
+    },
+    {
+      "id": "cap-440-memory-write",
+      "wire_profile": "capability_public_event",
+      "da_cap": "memory-write",
+      "issuer_role": "owner_grantor",
+      "grantee_role": "agent_grantee",
+      "subject_kind": "memory_owner_pubkey_hex",
+      "subject_preimage": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+      "salt_hex": "f96067abf15930778e61f002ca12da28",
+      "expected_da_scope": "261362ab7116b1d8fc980f90e019e4a8941500775ebc8b1ab062b08bd8e6e435",
+      "issuance_status": "dormant_gated_allowMemoryWrite_false",
+      "notes": "Defined in nvoy/mcp/tools/admission.mjs foldMemoryGrantsWith behind allowMemoryWrite=false default; live Hive memory uses manifest may_remember + writers.json.",
+      "event": {
+        "id": "e9800b09d875ac939b433aec9fa692ac7899cef00748462aefb2f99a08908c69",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700100,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd"
+          ],
+          [
+            "da-scope",
+            "261362ab7116b1d8fc980f90e019e4a8941500775ebc8b1ab062b08bd8e6e435",
+            "f96067abf15930778e61f002ca12da28"
+          ],
+          [
+            "da-cap",
+            "memory-write"
+          ]
+        ],
+        "content": "",
+        "sig": "43e3db2031632fe4317b8c4adc5fe4b61324dbbf73fd1323a20ab0602c633430fe93d4d5a6ec8e2bca00316df4b90a080a74aacaebfebbb9632dfe34ca505c0d"
+      }
+    }
+  ],
+  "capability_revocation_vectors": [
+    {
+      "id": "cap-441-revoke-task-same-author",
+      "wire_profile": "capability_public_event",
+      "revokes_vector_id": "cap-440-task",
+      "target_grant_id": "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6",
+      "issuer_role": "owner_grantor",
+      "expected_behavior": {
+        "strict_same_author_consumers": "revokes",
+        "grantor_pool_consumers": "revokes",
+        "timestamp_sorted_consumers": "revokes"
+      },
+      "notes": "Canonical same-author kind:441 revocation (441.pubkey === 440.pubkey, 441.created_at > 440.created_at). Revokes across all consumers.",
+      "event": {
+        "id": "1c10727042580692d45d70f19f60b94cbaae21052ebd2bd4d66f012038557366",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700200,
+        "kind": 441,
+        "tags": [
+          [
+            "e",
+            "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6"
+          ]
+        ],
+        "content": "",
+        "sig": "98befcfa45042d1b972321887efaf11064be60d29135107147723d1b0fd6607ca38370615f5805895acb123a5ef9838f97042bcda439009c63f1e5b3ff71f4ea"
+      }
+    },
+    {
+      "id": "cap-441-revoke-mirror-with-bridge-p",
+      "wire_profile": "capability_public_event",
+      "revokes_vector_id": "cap-440-mirror",
+      "target_grant_id": "e4503cbd3bd7c99e94d7cbb089ceed069738d9976bac09b0350065c34957dc8c",
+      "issuer_role": "mirror_subject",
+      "expected_behavior": {
+        "strict_same_author_consumers": "revokes",
+        "p_filtered_relay_subscriptions": "delivered_via_p_tag"
+      },
+      "notes": "Mirror consent revocation carrying both [\"e\", <440-id>] and [\"p\", <bridge-pubkey>] per waggle/tools/mint-consent.mjs so #p-filtered subscriptions see it.",
+      "event": {
+        "id": "c7e8aba56bcdefb3b8adbe05072f2479e1587d433abaedf3580ed78f092aa4dc",
+        "pubkey": "5b733da2c2a3fb8c26bf061a377cbbd0aa05dbc3047fdfedff7e6c4d624866d6",
+        "created_at": 1794700210,
+        "kind": 441,
+        "tags": [
+          [
+            "e",
+            "e4503cbd3bd7c99e94d7cbb089ceed069738d9976bac09b0350065c34957dc8c"
+          ],
+          [
+            "p",
+            "f0ef9db944ba5f5efda4f3ac9880f75fe3a4cd68bc3568958894ca2a75395f5f"
+          ]
+        ],
+        "content": "",
+        "sig": "d2942c7514e9611b761633a1e94b8e02c8c54ba73cd4ad446ccdbb32791cca6c8c09b9a958eff18a12773cc010267d489101d1b910e2e4d977cb582926eda482"
+      }
+    },
+    {
+      "id": "cap-441-revoke-onboard-backdated",
+      "wire_profile": "capability_public_event",
+      "revokes_vector_id": "cap-440-onboard",
+      "target_grant_id": "2f90787377e1e15d82eff35ea6671d1f8e17c7fa2aeab4abd74b2dadad1b3509",
+      "issuer_role": "owner_grantor",
+      "expected_behavior": {
+        "order_independent_consumers": "revokes",
+        "admission_foldGrantsWith_timestamp_sorted": "does_not_revoke_newer_440"
+      },
+      "notes": "Backdated same-author 441 (441.created_at < 440.created_at). Revokes in onboard_delegate.mjs, write-policy.py, bridge.mjs, consent.mjs, hive-list.mjs, and foldMemoryGrantsWith; exposes timestamp-ordering divergence vs admission.mjs:foldGrantsWith.",
+      "event": {
+        "id": "de960acc7d95929a4a414e3e4de24cfb647228a363e38d846279318791211618",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700085,
+        "kind": 441,
+        "tags": [
+          [
+            "e",
+            "2f90787377e1e15d82eff35ea6671d1f8e17c7fa2aeab4abd74b2dadad1b3509"
+          ]
+        ],
+        "content": "",
+        "sig": "1d53eed91de8d304e8c8b680addd014f555266080ad1a46dc2e350c0dc25a9608ff704201ddb2d5d344d8a3ab4f61b22c93734b9bd80a8ae216821995a3a826d"
+      }
+    },
+    {
+      "id": "cap-441-revoke-task-co-grantor",
+      "wire_profile": "capability_public_event",
+      "revokes_vector_id": "cap-440-task",
+      "target_grant_id": "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6",
+      "issuer_role": "co_grantor",
+      "expected_behavior": {
+        "strict_same_author_consumers": "ignored_not_grant_author",
+        "grantor_pool_consumers": "revokes_when_co_grantor_in_grantors"
+      },
+      "notes": "Co-grantor 441 (441.pubkey !== 440.pubkey, but co_grantor is in manifest.grantors). Exposes revocation-authority divergence: bridge.mjs and admission.mjs:foldGrantsWith revoke; hive-list.mjs, hive-change.mjs, onboard_delegate.mjs, capabilities.ts, and write-policy.py ignore.",
+      "event": {
+        "id": "417fb67c0236268f874dfedcab7ad0fb24641b83f6411e4fb06ab73190c6fd47",
+        "pubkey": "aa64052cdfa03d315e9067748392251ec781528dd9b58b868c480efe3a0bef8a",
+        "created_at": 1794700220,
+        "kind": 441,
+        "tags": [
+          [
+            "e",
+            "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6"
+          ]
+        ],
+        "content": "",
+        "sig": "1e93959a12a8b985c6fad18f644f07580f971f78dffdc404ab0ecb747c3888371263a89ddf95d83226cc58c5a193c9ee3dc64b28e492b936c223c78e18ac8310"
+      }
+    }
+  ],
+  "negative_vectors": [
+    {
+      "id": "neg-441-outsider-author",
+      "failure_code": "wrong_revocation_author",
+      "description": "Valid BIP-340 signature, but 441.pubkey is outsider (neither 440.pubkey nor in grantors). Must be rejected by all consumers.",
+      "target_grant_id": "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6",
+      "signature_valid": true,
+      "event": {
+        "id": "d2ea2aa50e0f090aa87bee0eef93ed723269acbe09ee888f5f991b8ef33dc59c",
+        "pubkey": "513a5e3bcca083afa5c81d23258941621bf25e9feac34e761a3e749a44976281",
+        "created_at": 1794700300,
+        "kind": 441,
+        "tags": [
+          [
+            "e",
+            "f9871e388731014d5bd7b71bcba3ff2d1ded3470950bac1e848cdaa8302c66a6"
+          ]
+        ],
+        "content": "",
+        "sig": "4508cc179a150d664c667deeb988c7e50e53cc6a20fd6e7f0f1c9970b13f61e10cd55d6c7c0b76bfef64493bc1c9fa28796ad73311b2d2960049d096c838b51f"
+      }
+    },
+    {
+      "id": "neg-440-self-shadow",
+      "failure_code": "self_delegation_forbidden",
+      "description": "Valid signature and da-scope, but da-cap=\"shadow\" has p === pubkey. Rejected by waggle/tools/grant.mjs and nvoy/mcp/tools/admission.mjs.",
+      "signature_valid": true,
+      "subject_preimage": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+      "event": {
+        "id": "52457d6f260229af5d5c3f1658b9090d238b1113387cb289e5828529a30d8ea1",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700310,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6"
+          ],
+          [
+            "da-scope",
+            "3a2814203172c1bbf47fee77d5c3443cc08e88a225a0a05d9160c76c6c679ed4",
+            "11578ef0ec00718596df4b720c2ff9c5"
+          ],
+          [
+            "da-cap",
+            "shadow"
+          ]
+        ],
+        "content": "",
+        "sig": "d8cf43e42f33492a9abcd474baaa035228b9b30643d47506b526ecdcb74cac6b655cc46133dc758ca422d3c9874658de1c3b873aaaded803457fb4fd4f28aba4"
+      }
+    },
+    {
+      "id": "neg-440-self-onboard",
+      "failure_code": "self_delegation_forbidden",
+      "description": "Valid signature and da-scope, but da-cap=\"onboard\" has p === pubkey. Rejected by onboard_delegate.mjs and nave.pub write-policy.py.",
+      "signature_valid": true,
+      "subject_preimage": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+      "event": {
+        "id": "7622140d495a231dce1028335bb5d5736d0c41741c4776aeb3e22d7b5250f1d6",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700320,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6"
+          ],
+          [
+            "da-scope",
+            "52ada685568e5a7b2f86c68a9ea2a65dcc1007abac7c116a6da090a5c2968a66",
+            "634e3759d4e9645002c25c5991b8190f"
+          ],
+          [
+            "da-cap",
+            "onboard"
+          ],
+          [
+            "policy",
+            "nave-terms-2026-11"
+          ],
+          [
+            "age",
+            "confirmed"
+          ]
+        ],
+        "content": "",
+        "sig": "ca0420bc0417518f1bcc4329ca16a5b8760f59761fe738b350a41e2a97467099905c833bcb6f7b74742987568c3e8292e4df573f5cf542b8bcaddf39de278ee0"
+      }
+    },
+    {
+      "id": "neg-440-bad-salt-nonhex",
+      "failure_code": "malformed_salt_hex",
+      "description": "da-scope salt is 32 non-hex \"z\" characters and commitment was hashed over 0 salt bytes. Strict hex validators (waggle/src/scope_hash.mjs, nave.pub write-policy.py) reject; exposes Node Buffer.from(salt, \"hex\") silent truncation in nvoy/mcp/tools/grant_fold.mjs.",
+      "signature_valid": true,
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "event": {
+        "id": "7ac93c9de92acce7ca013b5200c3a2ebccd5d0589a6c8e2d2b77a12c40723e46",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700330,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "cf223e05bd46581a482cbaddc1486fc56b3b372608a123d121c4d1911cf2b6b0",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+          ],
+          [
+            "da-cap",
+            "task"
+          ]
+        ],
+        "content": "",
+        "sig": "3f36ff2559c6d3ef629c3f3fdbb13468f4578ed8abd349162e05595daec81e1e0cfca794f2d1b35c215ffcfde3370f68417cf1045b85c996fa81ad1d11189a01"
+      }
+    },
+    {
+      "id": "neg-440-npub-unnormalized-subject",
+      "failure_code": "unnormalized_npub_subject",
+      "description": "da-scope commitment hashed bech32 npub1... UTF-8 string instead of normalized 64-hex pubkey. Fails scopeMatches(agent_grantee.pubkey).",
+      "signature_valid": true,
+      "unnormalized_subject": "npub1jwfrxjqf2lczftszr2mwxkqqs2p2m5hd7prvmqcv0zz0xxjhkrxskjt86y",
+      "expected_normalized_subject": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "event": {
+        "id": "c765943547a93156b846783db0096697347d31881ab5dc1900f26bacb8398b10",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700340,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "ee15daf45f3062ce03d4ce89d521e1a5017f1b93589c89956b56bc92695e8372",
+            "4f8b3006876c30c72e81adf0423f9752"
+          ],
+          [
+            "da-cap",
+            "task"
+          ]
+        ],
+        "content": "",
+        "sig": "fab508a94c6a902729bd6b08460eac0bad4e15486a968da01d067242c42fe83f83b71f344cda1df7fd7bba0cf46c222c162239a010756a615a9ff31f7404cc0a"
+      }
+    },
+    {
+      "id": "neg-440-expired",
+      "failure_code": "expired_nip40",
+      "description": "da-cap=\"task\" carries [\"expiration\", \"1700000000\"] < evaluation_now (1794700500). Rejected by NIP-40-enforcing folds (admission.mjs, onboard_delegate.mjs, hive-list.mjs, write-policy.py, capabilities.ts, nact).",
+      "signature_valid": true,
+      "evaluation_now": 1794700500,
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "event": {
+        "id": "1f5a0b398d6f67504afa9c3eb21ab2fe1109c04a7360f8f28e0513a010b6f88a",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700350,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "baee1e2e39d8f1f805b29643bd257fbc25db2f377c888310e51ed9370a3d6343",
+            "2ec791e908f22de1b81d199eba935c00"
+          ],
+          [
+            "da-cap",
+            "task"
+          ],
+          [
+            "expiration",
+            "1700000000"
+          ]
+        ],
+        "content": "",
+        "sig": "64fb9edd1c0d07b49e3ed9a9335745fb8e06091f418888f025ee669fc2862e1234a799fc597382e2ad364672a49b6988a99f3d8d70fc08c6be19b8b4ef86e5a2"
+      }
+    },
+    {
+      "id": "neg-440-malformed-expiration",
+      "failure_code": "malformed_nip40_expiration",
+      "description": "da-cap=\"task\" carries non-numeric [\"expiration\", \"not-a-timestamp\"]. Strict consumers (admission.mjs, onboard_delegate.mjs, hive-list.mjs, write-policy.py) fail closed; highlights capabilities.ts / nact divergence.",
+      "signature_valid": true,
+      "evaluation_now": 1794700500,
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "event": {
+        "id": "cecaed2ae2c7376fd3d34da1fd29b53a5daeceb51c79ea56ff4b378688bf71d9",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700355,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "519664ba151af2df80ee3768c4089e8eb6e1bc95cfb380a9c0bdb1f1a0edfbc6",
+            "3b139cb779a76564b70ddcdf480b2fc8"
+          ],
+          [
+            "da-cap",
+            "task"
+          ],
+          [
+            "expiration",
+            "not-a-timestamp"
+          ]
+        ],
+        "content": "",
+        "sig": "c8b8971e9882df47c4835a6ce5a79da45094f40ff3ce8849d44a0c67ae3cfa59301a08b0abaf25513e5c3d13d49936e62350ae8d83101db2c99c1c64e1902498"
+      }
+    },
+    {
+      "id": "neg-440-tampered-sig",
+      "failure_code": "invalid_schnorr_signature",
+      "description": "First hex nibble of BIP-340 sig is flipped after signing; id still matches content/tags hash, so only cryptographic signature verification catches it.",
+      "signature_valid": false,
+      "subject_preimage": "939233480957f024ae021ab6e358008282add2edf046cd830c7884f31a57b0cd",
+      "event": {
+        "id": "2afcee1ed88c299d322d18b75f1d07e085078608ada47c35683d1670e00d5069",
+        "pubkey": "808b811d14845c4fff676b790ba59007e00f3a0fd6ff9aad3676d7136460a2f6",
+        "created_at": 1794700360,
+        "kind": 440,
+        "tags": [
+          [
+            "p",
+            "64d4e0b48c826eaab4d253b3935c90635625597d82bf07fb477f0dbd5a8bf50e"
+          ],
+          [
+            "da-scope",
+            "a2b798c83f67314aa4faf6b784a50ebdca0560c5f4cd551166ef5c7554bda37e",
+            "a6498605f3f00b3432fedd1d75214bba"
+          ],
+          [
+            "da-cap",
+            "task"
+          ]
+        ],
+        "content": "",
+        "sig": "0a1e831b5b5cfbdd198bc8ae5967961c84842439feaf074c23468385005f46b234e2bdcca5923c52ed8b5f039ceb2324155a4b06b119796eb451d7d42b051a4b"
+      }
+    }
+  ]
+}

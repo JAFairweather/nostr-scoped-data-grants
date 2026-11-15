@@ -111,6 +111,9 @@ with the printed key.
 | `go/main.go`    | second implementation: Go CLI over go-nostr |
 | `interop.mjs`   | JS↔Go cross-implementation test, live relays |
 | `seed.mjs`      | demo-graph seeder for Nontact |
+| `CAPABILITY-GRANTS-INVENTORY.md` | cross-repo `kind:440`/`441` `da-cap` & `da-scope` consumer inventory |
+| `fixtures/capability-grants-v1.json` | frozen signed `440`/`441` capability & rumor test vectors |
+| `smoke-capability-fixtures.mjs` | offline verifier for `fixtures/capability-grants-v1.json` (`npm run smoke:fixtures`) |
 
 ## Design notes
 
